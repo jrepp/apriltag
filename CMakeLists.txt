@@ -19,8 +19,27 @@ endif()
 aux_source_directory(common COMMON_SRC)
 set(APRILTAG_SRCS apriltag.c apriltag_pose.c apriltag_quad_thresh.c)
 
+# Tag support - each tag table consumes space in the library
+option(USE_16h5 "Support 16h5 tag format" ON)
+option(USE_25h9 "Support 25h9 tag format" ON)
+option(USE_36h10 "Support 36h10 tag format" ON)
+option(USE_36h11 "Support 36h11 tag format" ON)
+option(USE_Circle21h7 "Support Circle21h7 tag format" ON)
+option(USE_Circle49h12 "Support Circle49h12 tag format" ON)
+option(USE_Custom48h12 "Support Custom48h12 tag format" ON)
+option(USE_Standard41h12 "Support Standard41h12 tag format" ON)
+option(USE_Standard52h13 "Support Standard52h13 tag format" ON)
+
+
 # Library
 file(GLOB TAG_FILES ${PROJECT_SOURCE_DIR}/tag*.c)
+foreach (tag_option 16h5;25h9;36h10;36h11;Circle21h7;Circle49h12;Custom48h12;Standard41h12;Standard52h13)
+    set (OPTION_NAME "USE_${tag_option}")
+    if (${OPTION_NAME})
+        message(STATUS "Including tag format ${tag_option}")
+    endif ()
+endforeach () 
+
 add_library(${PROJECT_NAME} ${APRILTAG_SRCS} ${COMMON_SRC} ${TAG_FILES})
 
 if (MSVC)
