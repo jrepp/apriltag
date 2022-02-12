@@ -51,7 +51,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "common/image_u8.h"
 #include "common/image_u8x4.h"
 #include "common/pjpeg.h"
-#include "common/zarray.h"
+#include "common/vec.h"
 
 // Invoke:
 //

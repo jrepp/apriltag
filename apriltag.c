@@ -42,7 +42,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "common/image_u8.h"
 #include "common/image_u8x3.h"
 #include "common/zhash.h"
-#include "common/zarray.h"
+#include "common/vec.h"
 #include "common/matd.h"
 #include "common/homography.h"
 #include "common/timeprofile.h"
@@ -324,13 +324,13 @@ static inline int detection_compare_function(const void *_a, const void *_b)
     return a->id - b->id;
 }
 
-void apriltag_detector_remove_family(apriltag_detector_t *td, apriltag_family_t *fam)
+void apriltag_detector_remove_family(apriltag_detector_t *td, const apriltag_family_t *fam)
 {
     quick_decode_uninit(fam);
     zarray_remove_value(td->tag_families, &fam, 0);
 }
 
-void apriltag_detector_add_family_bits(apriltag_detector_t *td, apriltag_family_t *fam, int bits_corrected)
+void apriltag_detector_add_family_bits(apriltag_detector_t *td, const apriltag_family_t *fam, int bits_corrected)
 {
     zarray_add(td->tag_families, &fam);
 
@@ -348,9 +348,9 @@ void apriltag_detector_clear_families(apriltag_detector_t *td)
     zarray_clear(td->tag_families);
 }
 
-apriltag_detector_t *apriltag_detector_create()
+int apriltag_detector_init(apriltag_detector_t *td)
 {
-    apriltag_detector_t *td = (apriltag_detector_t*) calloc(1, sizeof(apriltag_detector_t));
+    memset(td, 0, sizeof(apriltag_detector_t ));
 
     td->nthreads = 1;
     td->quad_decimate = 2.0;
@@ -364,7 +364,7 @@ apriltag_detector_t *apriltag_detector_create()
     td->qtp.deglitch = 0;
     td->qtp.min_white_black_diff = 5;
 
-    td->tag_families = zarray_create(sizeof(apriltag_family_t*));
+    vec_init(&td->tag_families);
 
     pthread_mutex_init(&td->mutex, NULL);
 
@@ -379,7 +379,7 @@ apriltag_detector_t *apriltag_detector_create()
     // NB: defer initialization of td->wp so that the user can
     // override td->nthreads.
 
-    return td;
+    return 0;
 }
 
 void apriltag_detector_destroy(apriltag_detector_t *td)
@@ -389,7 +389,7 @@ void apriltag_detector_destroy(apriltag_detector_t *td)
 
     apriltag_detector_clear_families(td);
 
-    zarray_destroy(td->tag_families);
+    vec_deinit(&td->tag_families);
     free(td);
 }
 
@@ -988,12 +988,11 @@ static int prefer_smaller(int pref, double q0, double q1)
     return 0;
 }
 
-zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
+int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_apriltag_detection_t *detections)
 {
-    if (zarray_size(td->tag_families) == 0) {
-        zarray_t *s = zarray_create(sizeof(apriltag_detection_t*));
+    if (vec_empty(&td->tag_families)) {
         printf("apriltag.c: No tag families enabled.");
-        return s;
+        return -1;
     }
 
     if (td->wp == NULL || td->nthreads != workerpool_get_nthreads(td->wp)) {
@@ -1087,8 +1086,6 @@ zarray_t *apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig)
 
     if (quad_im != im_orig)
         image_u8_destroy(quad_im);
-
-    zarray_t *detections = zarray_create(sizeof(apriltag_detection_t*));
 
     td->nquads = zarray_size(quads);
 

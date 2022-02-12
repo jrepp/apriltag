@@ -60,8 +60,8 @@ struct getopt
 {
     zhash_t  *lopts;
     zhash_t  *sopts;
-    zarray_t   *extraargs;
-    zarray_t   *options;
+    vec_str_t extraargs;
+    vec_str_t options;
 };
 
 getopt_t *getopt_create()
@@ -70,8 +70,8 @@ getopt_t *getopt_create()
 
     gopt->lopts     = zhash_create(sizeof(char*), sizeof(getopt_option_t*), zhash_str_hash, zhash_str_equals);
     gopt->sopts     = zhash_create(sizeof(char*), sizeof(getopt_option_t*), zhash_str_hash, zhash_str_equals);
-    gopt->options   = zarray_create(sizeof(getopt_option_t*));
-    gopt->extraargs = zarray_create(sizeof(char*));
+    vec_init(&gopt->options);
+    vec_init(&gopt->extraargs);
 
     return gopt;
 }
@@ -89,13 +89,13 @@ void getopt_option_destroy(getopt_option_t *goo)
 void getopt_destroy(getopt_t *gopt)
 {
     // free the extra arguments and container
-    zarray_vmap(gopt->extraargs, free);
-    zarray_destroy(gopt->extraargs);
+    vec_map(gopt->extraargs, free);
+    vec_deinit(&gopt->extraargs);
 
     // deep free of the getopt_option structs. Also frees key/values, so
     // after this loop, hash tables will no longer work
     zarray_vmap(gopt->options, getopt_option_destroy);
-    zarray_destroy(gopt->options);
+    vec_deinit(&gopt->options);
 
     // free tables
     zhash_destroy(gopt->lopts);
@@ -142,7 +142,8 @@ static char *get_arg_assignment(char *arg)
 int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
 {
     int okay = 1;
-    zarray_t *toks = zarray_create(sizeof(char*));
+    vec_str_t toks;
+    vec_init(&toks);
 
     // take the input stream and chop it up into tokens
     for (int i = 1; i < argc; i++) {
@@ -152,13 +153,13 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
 
         // no equal sign? Push the whole thing.
         if (eq == NULL) {
-            zarray_add(toks, &arg);
+            vec_push(&toks, arg);
         } else {
             // there was an equal sign. Push the part
             // before and after the equal sign
             char *val = strdup(&eq[1]);
             eq[0] = 0;
-            zarray_add(toks, &arg);
+            vec_push(&toks, arg);
 
             // if the part after the equal sign is
             // enclosed by quotation marks, strip them.
@@ -167,10 +168,10 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
                 if (val[last]=='\"')
                     val[last] = 0;
                 char *valclean = strdup(&val[1]);
-                zarray_add(toks, &valclean);
+                vec_push(&toks, valclean);
                 free(val);
             } else {
-                zarray_add(toks, &val);
+                vec_push(&toks, val);
             }
         }
     }
@@ -180,13 +181,13 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
 
     char *tok = NULL;
 
-    while (i < zarray_size(toks)) {
+    while (i < vec_length(&toks)) {
 
         // rather than free statement throughout this while loop
         if (tok != NULL)
             free(tok);
 
-        zarray_get(toks, i, &tok);
+        tok = toks.data[i];
 
         if (!strncmp(tok,"--", 2)) {
             char *optname = &tok[2];
@@ -203,9 +204,8 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
             goo->was_specified = 1;
 
             if (goo->type == GOO_BOOL_TYPE) {
-                if ((i+1) < zarray_size(toks)) {
-                    char *val = NULL;
-                    zarray_get(toks, i+1, &val);
+                if ((i+1) < vec_length(&toks)) {
+                    char *val = toks.data[i + 1];
 
                     if (!strcmp(val,"true")) {
                         i+=2;
@@ -225,9 +225,8 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
 
             if (goo->type == GOO_STRING_TYPE) {
                 // TODO: check whether next argument is an option, denoting missing argument
-                if ((i+1) < zarray_size(toks)) {
-                    char *val = NULL;
-                    zarray_get(toks, i+1, &val);
+                if ((i+1) < vec_length(&toks)) {
+                    char *val = toks.data[i+1];
                     i+=2;
                     getopt_modify_string(&goo->svalue, val);
                     continue;
@@ -253,7 +252,7 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
                 if (goo==NULL) {
                     // is the argument a numerical literal that happens to be negative?
                     if (pos==1 && isdigit(tok[pos])) {
-                        zarray_add(gopt->extraargs, &tok);
+                        vec_push(&gopt->extraargs, &tok);
                         tok = NULL;
                         break;
                     } else {

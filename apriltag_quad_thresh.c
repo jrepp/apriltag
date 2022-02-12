@@ -36,7 +36,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 
 #include "apriltag.h"
 #include "common/image_u8x3.h"
-#include "common/zarray.h"
+#include "common/vec.h"
 #include "common/zhash.h"
 #include "common/unionfind.h"
 #include "common/timeprofile.h"
@@ -55,26 +55,26 @@ static inline uint32_t u64hash_2(uint64_t x) {
     return (2654435761 * x) >> 32;
 }
 
-struct uint64_zarray_entry
-{
-    uint64_t id;
-    zarray_t *cluster;
-
-    struct uint64_zarray_entry *next;
-};
-
-#ifndef M_PI
-# define M_PI 3.141592653589793238462643383279502884196
-#endif
-
-struct pt
+typedef struct cluster_pt
 {
     // Note: these represent 2*actual value.
     uint16_t x, y;
     int16_t gx, gy;
 
     float slope;
+} cluster_pt_t;
+
+struct uint64_zarray_entry
+{
+    struct uint64_zarray_entry *next;
+    uint64_t id;
+    vec_define_fields(cluster_pt_t)
 };
+
+#ifndef M_PI
+# define M_PI 3.141592653589793238462643383279502884196
+#endif
+
 
 struct unionfind_task
 {
