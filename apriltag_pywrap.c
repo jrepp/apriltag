@@ -228,8 +228,10 @@ static PyObject* apriltag_detect(apriltag_py_t* self,
                      .stride = strides[0],
                      .buf    = PyArray_DATA(image)};
 
-    zarray_t* detections = apriltag_detector_detect(self->td, &im);
-    int N = zarray_size(detections);
+    vec_apriltag_detection_t detections;
+    vec_init(&detections);
+    apriltag_detector_detect(self->td, &im, &detections);
+    vec_size_t N = vec_length(&detections);
 
     detections_tuple = PyTuple_New(N);
     if(detections_tuple == NULL)
@@ -253,8 +255,7 @@ static PyObject* apriltag_detect(apriltag_py_t* self,
             goto done;
         }
 
-        apriltag_detection_t* det;
-        zarray_get(detections, i, &det);
+        const apriltag_detection_t* det = detections.data[i];
 
         *(double*)PyArray_GETPTR1(xy_c, 0) = det->c[0];
         *(double*)PyArray_GETPTR1(xy_c, 1) = det->c[1];
@@ -275,7 +276,7 @@ static PyObject* apriltag_detect(apriltag_py_t* self,
         xy_c           = NULL;
         xy_lb_rb_rt_lt = NULL;
     }
-    apriltag_detections_destroy(detections);
+    vec_deinit(&detections);
 
     result = detections_tuple;
     detections_tuple = NULL;

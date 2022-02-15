@@ -151,9 +151,9 @@ int zhash_get_volatile(const zhash_t *zh, const void *key, void *out_p);
  *
  * Example:
  *   char * key = ...;
- *   zarray_t * val = ...;
+ *   void * val = ...;
  *   char * old_key = NULL;
- *   zarray_t * old_val = NULL;
+ *   void * old_val = NULL;
  *   if (zhash_put(zh, &key, &val, &old_key, &old_value))
  *       // manage resources for old_key and old_value
  *
@@ -297,17 +297,15 @@ void zhash_vmap_values(zhash_t *vh, void (*f)());
 
 /**
  * Returns an array which contains copies of all of the hash table's keys, in no
- * particular order. It is the caller's responsibility to call zarray_destroy()
- * on the returned structure when it is no longer needed.
+ * particular order. It is the caller's responsibility to destroy return values.
  */
-zarray_t *zhash_keys(const zhash_t *zh);
+void zhash_keys(const zhash_t *zh, vec_void_t *keys);
 
 /**
  * Returns an array which contains copies of all of the hash table's values, in no
- * particular order. It is the caller's responsibility to call zarray_destroy()
- * on the returned structure when it is no longer needed.
+ * particular order. It is the caller's responsibility to destroy returned values.
  */
-zarray_t *zhash_values(const zhash_t *zh);
+void zhash_values(const zhash_t *zh, vec_void_t *values);
 
 /**
  * Defines a hash function which will calculate a zhash value for uint32_t input

@@ -33,7 +33,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <errno.h>
 
 #include "zhash.h"
-#include "zarray.h"
+#include "vec.h"
 #include "getopt.h"
 #include "common/math_util.h"
 
@@ -56,12 +56,16 @@ struct getopt_option
     int was_specified;
 };
 
+typedef struct {
+    vec_define_fields(struct getopt_option*)
+} vec_options_t;
+
 struct getopt
 {
     zhash_t  *lopts;
     zhash_t  *sopts;
     vec_str_t extraargs;
-    vec_str_t options;
+    vec_options_t options;
 };
 
 getopt_t *getopt_create()
@@ -89,12 +93,12 @@ void getopt_option_destroy(getopt_option_t *goo)
 void getopt_destroy(getopt_t *gopt)
 {
     // free the extra arguments and container
-    vec_map(gopt->extraargs, free);
+    vec_each(&gopt->extraargs, free);
     vec_deinit(&gopt->extraargs);
 
     // deep free of the getopt_option structs. Also frees key/values, so
     // after this loop, hash tables will no longer work
-    zarray_vmap(gopt->options, getopt_option_destroy);
+    vec_each(&gopt->options, getopt_option_destroy);
     vec_deinit(&gopt->options);
 
     // free tables
@@ -252,7 +256,7 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
                 if (goo==NULL) {
                     // is the argument a numerical literal that happens to be negative?
                     if (pos==1 && isdigit(tok[pos])) {
-                        vec_push(&gopt->extraargs, &tok);
+                        vec_push(&gopt->extraargs, tok);
                         tok = NULL;
                         break;
                     } else {
@@ -272,9 +276,9 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
                 }
 
                 if (goo->type == GOO_STRING_TYPE) {
-                    if ((i+1) < zarray_size(toks)) {
-                        char *val = NULL;
-                        zarray_get(toks, i+1, &val);
+                    if ((i+1) < vec_length(&toks)) {
+                        char *val = toks.data[i + 1];
+
                         // TODO: allow negative numerical values for short-name options ?
                         if (val[0]=='-')
                         {
@@ -297,14 +301,14 @@ int getopt_parse(getopt_t *gopt, int argc, char *argv[], int showErrors)
         }
 
         // it's not an option-- it's an argument.
-        zarray_add(gopt->extraargs, &tok);
+        vec_push(&gopt->extraargs, tok);
         tok = NULL;
         i++;
     }
     if (tok != NULL)
         free(tok);
 
-    zarray_destroy(toks);
+    vec_deinit(&toks);
 
     return okay;
 }
@@ -314,7 +318,7 @@ void getopt_add_spacer(getopt_t *gopt, const char *s)
     getopt_option_t *goo = (getopt_option_t*) calloc(1, sizeof(getopt_option_t));
     goo->spacer = 1;
     goo->help = strdup(s);
-    zarray_add(gopt->options, &goo);
+    vec_push(&gopt->options, goo);
 }
 
 void getopt_add_bool(getopt_t *gopt, char sopt, const char *lname, int def, const char *help)
@@ -353,7 +357,7 @@ void getopt_add_bool(getopt_t *gopt, char sopt, const char *lname, int def, cons
 
     zhash_put(gopt->lopts, &goo->lname, &goo, NULL, NULL);
     zhash_put(gopt->sopts, &goo->sname, &goo, NULL, NULL);
-    zarray_add(gopt->options, &goo);
+    vec_push(&gopt->options, &goo);
 }
 
 void getopt_add_int(getopt_t *gopt, char sopt, const char *lname, const char *def, const char *help)
@@ -403,7 +407,7 @@ void getopt_add_string(getopt_t *gopt, char sopt, const char *lname, const char 
 
     zhash_put(gopt->lopts, &goo->lname, &goo, NULL, NULL);
     zhash_put(gopt->sopts, &goo->sname, &goo, NULL, NULL);
-    zarray_add(gopt->options, &goo);
+    vec_push(&gopt->options, &goo);
 }
 
 const char *getopt_get_string(getopt_t *gopt, const char *lname)
@@ -478,9 +482,9 @@ int getopt_was_specified(getopt_t *getopt, const char *lname)
     return goo->was_specified;
 }
 
-const zarray_t *getopt_get_extra_args(getopt_t *gopt)
+const vec_str_t *getopt_get_extra_args(getopt_t *gopt)
 {
-    return gopt->extraargs;
+    return &gopt->extraargs;
 }
 
 void getopt_do_usage(getopt_t * gopt)
@@ -498,9 +502,8 @@ char * getopt_get_usage(getopt_t *gopt)
     int longwidth=12;
     int valuewidth=10;
 
-    for (unsigned int i = 0; i < zarray_size(gopt->options); i++) {
-        getopt_option_t *goo = NULL;
-        zarray_get(gopt->options, i, &goo);
+    for (unsigned int i = 0; i < vec_length(&gopt->options); i++) {
+        const getopt_option_t *goo = gopt->options.data[i];
 
         if (goo->spacer)
             continue;
@@ -511,9 +514,8 @@ char * getopt_get_usage(getopt_t *gopt)
             valuewidth = max(valuewidth, (int) strlen(goo->svalue));
     }
 
-    for (unsigned int i = 0; i < zarray_size(gopt->options); i++) {
-        getopt_option_t *goo = NULL;
-        zarray_get(gopt->options, i, &goo);
+    for (unsigned int i = 0; i < vec_length(&gopt->options); i++) {
+        const getopt_option_t *goo = gopt->options.data[i];
 
         if (goo->spacer)
         {

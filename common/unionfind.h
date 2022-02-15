@@ -29,14 +29,19 @@ either expressed or implied, of the Regents of The University of Michigan.
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "vec.h"
 
 typedef struct unionfind unionfind_t;
 
-struct unionfind
+typedef struct unionfind
 {
     uint32_t maxid;
     struct ufrec *data;
-};
+} unionfind_t;
+
+typedef struct {
+    vec_define_fields(unionfind_t)
+} vec_unions_t;
 
 struct ufrec
 {
@@ -86,7 +91,7 @@ static inline uint32_t unionfind_get_representative(unionfind_t *uf, uint32_t id
 
 // this one seems to be every-so-slightly faster than the recursive
 // version above.
-static inline uint32_t unionfind_get_representative(unionfind_t *uf, uint32_t id)
+static inline uint32_t unionfind_get_representative(const unionfind_t *uf, uint32_t id)
 {
     uint32_t root = id;
 
@@ -105,13 +110,13 @@ static inline uint32_t unionfind_get_representative(unionfind_t *uf, uint32_t id
     return root;
 }
 
-static inline uint32_t unionfind_get_set_size(unionfind_t *uf, uint32_t id)
+static inline uint32_t unionfind_get_set_size(const unionfind_t *uf, uint32_t id)
 {
     uint32_t repid = unionfind_get_representative(uf, id);
     return uf->data[repid].size;
 }
 
-static inline uint32_t unionfind_connect(unionfind_t *uf, uint32_t aid, uint32_t bid)
+static inline uint32_t unionfind_connect(const unionfind_t *uf, uint32_t aid, uint32_t bid)
 {
     uint32_t aroot = unionfind_get_representative(uf, aid);
     uint32_t broot = unionfind_get_representative(uf, bid);

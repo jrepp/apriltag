@@ -32,7 +32,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <stdbool.h>
 #include <ctype.h>
 
-#include "zarray.h"
+#include "vec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -86,19 +86,21 @@ int str_diff_idx(const char * a, const char * b);
  * contain the delimiter. The original string will remain unchanged.
  * If str is composed of all delimiters, an empty array will be returned.
  *
- * It is the caller's responsibilty to free the returned zarray, as well as
+ * It is the caller's responsibilty to free the returned vec, as well as
  * the strings contained within it, e.g.:
  *
- *   zarray_t *za = str_split("this is a haystack", " ");
+ *   vec_str_t za;
+ *   vec_init(&za);
+ *   str_split("this is a haystack", " ", &za);
  *      => ["this", "is", "a", "haystack"]
- *   zarray_vmap(za, free);
- *   zarray_destroy(za);
+ *   vec_map_inline(&za, free);
+ *   str_split_destroy(&za);
  */
-zarray_t *str_split(const char *str, const char *delim);
+void str_split(const char *str, const char *delim, vec_str_t *parts);
 
-zarray_t *str_split_spaces(const char *str);
+void str_split_spaces(const char *str, vec_str_t *parts);
 
-void str_split_destroy(zarray_t *s);
+void str_split_destroy(vec_str_t *s);
 
 /*
  * Determines if str1 exactly matches str2 (more efficient than strcmp(...) == 0)

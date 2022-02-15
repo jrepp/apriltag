@@ -26,6 +26,8 @@ typedef VEC_SIZE_TYPE vec_size_t;
   #define VEC_POST_ALIGN
 #endif
 
+#define VEC_USE_CHECKED_ACCESS 1
+
 //
 // Memory allocator overrides
 //

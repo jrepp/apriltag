@@ -27,8 +27,8 @@ either expressed or implied, of the Regents of The University of Michigan.
 
 #pragma once
 
-#include "matd.h"
-#include "zarray.h"
+#include "common/matd.h"
+#include "common/vec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -128,7 +128,15 @@ extern "C" {
 #define HOMOGRAPHY_COMPUTE_FLAG_INVERSE 1
 #define HOMOGRAPHY_COMPUTE_FLAG_SVD 0
 
-matd_t *homography_compute(zarray_t *correspondences, int flags);
+typedef struct {
+   float a, b, c, d;
+} correspondence_t;
+
+typedef struct {
+    vec_define_fields(correspondence_t);
+} vec_correspondence_t;
+
+matd_t *homography_compute(vec_correspondence_t *correspondences, int flags);
 
 //void homography_project(const matd_t *H, double x, double y, double *ox, double *oy);
 static inline void homography_project(const matd_t *H, double x, double y, double *ox, double *oy)

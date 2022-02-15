@@ -78,7 +78,7 @@ int main(int argc, char *argv[])
         exit(0);
     }
 
-    const zarray_t *inputs = getopt_get_extra_args(getopt);
+    const vec_str_t *inputs = getopt_get_extra_args(getopt);
 
     apriltag_family_t *tf = NULL;
     const char *famname = getopt_get_string(getopt, "family");
@@ -103,13 +103,14 @@ int main(int argc, char *argv[])
         exit(-1);
     }
 
-    apriltag_detector_t *td = apriltag_detector_create();
-    apriltag_detector_add_family_bits(td, tf, getopt_get_int(getopt, "hamming"));
-    td->quad_decimate = getopt_get_double(getopt, "decimate");
-    td->quad_sigma = getopt_get_double(getopt, "blur");
-    td->nthreads = getopt_get_int(getopt, "threads");
-    td->debug = getopt_get_bool(getopt, "debug");
-    td->refine_edges = getopt_get_bool(getopt, "refine-edges");
+    apriltag_detector_t td;
+    apriltag_detector_init(&td);
+    apriltag_detector_add_family_bits(&td, tf, getopt_get_int(getopt, "hamming"));
+    td.quad_decimate = getopt_get_double(getopt, "decimate");
+    td.quad_sigma = getopt_get_double(getopt, "blur");
+    td.nthreads = getopt_get_int(getopt, "threads");
+    td.debug = getopt_get_bool(getopt, "debug");
+    td.refine_edges = getopt_get_bool(getopt, "refine-edges");
 
     int quiet = getopt_get_bool(getopt, "quiet");
 
@@ -127,13 +128,12 @@ int main(int argc, char *argv[])
         if (maxiters > 1)
             printf("iter %d / %d\n", iter + 1, maxiters);
 
-        for (int input = 0; input < zarray_size(inputs); input++) {
+        for (int input = 0; input < vec_length(inputs); input++) {
 
             int hamm_hist[hamm_hist_max];
             memset(hamm_hist, 0, sizeof(hamm_hist));
 
-            char *path;
-            zarray_get(inputs, input, &path);
+            char *path = vec_get(inputs, input);
             if (!quiet)
                 printf("loading %s\n", path);
             else
@@ -178,7 +178,7 @@ int main(int argc, char *argv[])
                         }
                     }
                     image_u8x3_destroy(imc);
-                    if (td->debug)
+                    if (td.debug)
                         image_u8_write_pnm(im, "debug_invariant.pnm");
                 }
 
@@ -190,12 +190,11 @@ int main(int argc, char *argv[])
                 continue;
             }
 
-            zarray_t *detections = apriltag_detector_detect(td, im);
+            vec_apriltag_detection_t detections;
+            apriltag_detector_detect(&td, im, &detections);
 
-            for (int i = 0; i < zarray_size(detections); i++) {
-                apriltag_detection_t *det;
-                zarray_get(detections, i, &det);
-
+            for (int i = 0; i < vec_length(&detections); i++) {
+                apriltag_detection_t *det = vec_get(&detections, i);
                 if (!quiet)
                     printf("detection %3d: id (%2dx%2d)-%-4d, hamming %d, margin %8.3f\n",
                            i, det->family->nbits, det->family->h, det->id, det->hamming, det->decision_margin);
@@ -203,14 +202,13 @@ int main(int argc, char *argv[])
                 hamm_hist[det->hamming]++;
                 total_hamm_hist[det->hamming]++;
             }
-
-            apriltag_detections_destroy(detections);
+            vec_deinit(&detections);
 
             if (!quiet) {
-                timeprofile_display(td->tp);
+                timeprofile_display(td.tp);
             }
 
-            total_quads += td->nquads;
+            total_quads += td.nquads;
 
             if (!quiet)
                 printf("hamm ");
@@ -218,10 +216,10 @@ int main(int argc, char *argv[])
             for (int i = 0; i < hamm_hist_max; i++)
                 printf("%5d ", hamm_hist[i]);
 
-            double t =  timeprofile_total_utime(td->tp) / 1.0E3;
+            double t =  timeprofile_total_utime(td.tp) / 1.0E3;
             total_time += t;
             printf("%12.3f ", t);
-            printf("%5d", td->nquads);
+            printf("%5d", td.nquads);
 
             printf("\n");
 
@@ -242,7 +240,7 @@ int main(int argc, char *argv[])
     }
 
     // don't deallocate contents of inputs; those are the argv
-    apriltag_detector_destroy(td);
+    apriltag_detector_destroy(&td);
 
     if (!strcmp(famname, "tag36h11")) {
         tag36h11_destroy(tf);

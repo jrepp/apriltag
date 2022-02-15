@@ -64,12 +64,34 @@ typedef struct cluster_pt
     float slope;
 } cluster_pt_t;
 
-struct uint64_zarray_entry
+typedef struct cluster_id
 {
-    struct uint64_zarray_entry *next;
+    struct cluster_id *next;
     uint64_t id;
     vec_define_fields(cluster_pt_t)
-};
+} cluster_id_t;
+
+typedef struct cluster_hash
+{
+    uint64_t id;
+    uint64_t hash;
+    vec_define_fields(cluster_pt_t);
+} cluster_hash_t;
+
+// array of pointer to cluster_hash_t
+typedef struct {
+    vec_define_fields(cluster_hash_t*)
+} vec_cluster_hash_ptr_t;
+
+typedef struct {
+    vec_define_fields(cluster_pt_t);
+} vec_cluster_pt_t;
+
+typedef struct {
+    vec_define_fields(vec_cluster_pt_t);
+} vec_multi_cluster_t;
+
+
 
 #ifndef M_PI
 # define M_PI 3.141592653589793238462643383279502884196
@@ -86,13 +108,13 @@ struct unionfind_task
 
 struct quad_task
 {
-    zarray_t *clusters;
-    int cidx0, cidx1; // [cidx0, cidx1)
-    zarray_t *quads;
+    vec_multi_cluster_t *clusters;
+    vec_atquad_t quads;
     apriltag_detector_t *td;
+    int cidx0, cidx1; // [cidx0, cidx1)
     int w, h;
 
-    image_u8_t *im;
+    const image_u8_t *im;
     int tag_width;
     bool normal_border;
     bool reversed_border;
@@ -106,9 +128,9 @@ struct cluster_task
     int w;
     int s;
     int nclustermap;
-    unionfind_t* uf;
-    image_u8_t* im;
-    zarray_t* clusters;
+    const unionfind_t* uf;
+    const image_u8_t* im;
+    vec_cluster_hash_ptr_t cluster_hashes;
 };
 
 struct remove_vertex
@@ -119,29 +141,21 @@ struct remove_vertex
     double err;
 };
 
-struct segment
+typedef struct segment
 {
     int is_vertex;
 
     // always greater than zero, but right can be > size, which denotes
     // a wrap around back to the beginning of the points. and left < right.
     int left, right;
-};
+} segment_t;
 
-struct line_fit_pt
+typedef struct line_fit_pt
 {
     double Mx, My;
     double Mxx, Myy, Mxy;
     double W; // total weight
-};
-
-struct cluster_hash
-{
-    uint32_t hash;
-    uint64_t id;
-    zarray_t* data;
-};
-
+} line_fit_pt_t;
 
 // lfps contains *cumulative* moments for N points, with
 // index j reflecting points [0,j] (inclusive).
@@ -263,7 +277,7 @@ void fit_line(struct line_fit_pt *lfps, int sz, int i0, int i1, double *lineparm
         *mse = eig_small;
 }
 
-float pt_compare_angle(struct pt *a, struct pt *b) {
+float pt_compare_angle(cluster_pt_t *a, cluster_pt_t *b) {
     return a->slope - b->slope;
 }
 
@@ -291,9 +305,9 @@ int err_compare_descending(const void *_a, const void *_b)
   rather than pairs of clusters.) Critically, this helps keep nearby
   edges from becoming connected.
 */
-int quad_segment_maxima(apriltag_detector_t *td, zarray_t *cluster, struct line_fit_pt *lfps, int indices[4])
+int quad_segment_maxima(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line_fit_pt_t *lfps, int indices[4])
 {
-    int sz = zarray_size(cluster);
+    vec_size_t sz = vec_length(cluster);
 
     // ksz: when fitting points, how many points on either side do we consider?
     // (actual "kernel" width is 2ksz).
@@ -475,13 +489,13 @@ int quad_segment_maxima(apriltag_detector_t *td, zarray_t *cluster, struct line_
 }
 
 // returns 0 if the cluster looks bad.
-int quad_segment_agg(apriltag_detector_t *td, zarray_t *cluster, struct line_fit_pt *lfps, int indices[4])
+int quad_segment_agg(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line_fit_pt_t *lfps, int indices[4])
 {
-    int sz = zarray_size(cluster);
+    int sz = vec_length(cluster);
 
     zmaxheap_t *heap = zmaxheap_create(sizeof(struct remove_vertex*));
 
-    // We will initially allocate sz rvs. We then have two types of
+    // We will initially allocate sz remove_vertex elements. We then have two types of
     // iterations: some iterations that are no-ops in terms of
     // allocations, and those that remove a vertex and allocate two
     // more children.  This will happen at most (sz-4) times.  Thus we
@@ -589,12 +603,11 @@ int quad_segment_agg(apriltag_detector_t *td, zarray_t *cluster, struct line_fit
  * Compute statistics that allow line fit queries to be
  * efficiently computed for any contiguous range of indices.
  */
-struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
-    struct line_fit_pt *lfps = calloc(sz, sizeof(struct line_fit_pt));
+line_fit_pt_t* compute_lfps(int sz, vec_cluster_pt_t* cluster, const image_u8_t* im) {
+    line_fit_pt_t *lfps = calloc(sz, sizeof(line_fit_pt_t));
 
-    for (int i = 0; i < sz; i++) {
-        struct pt *p;
-        zarray_get_volatile(cluster, i, &p);
+    for (vec_size_t i = 0; i < sz; i++) {
+        const cluster_pt_t *p = vec_get_ptr(cluster, i);
 
         if (i > 0) {
             memcpy(&lfps[i], &lfps[i-1], sizeof(struct line_fit_pt));
@@ -631,7 +644,7 @@ struct line_fit_pt* compute_lfps(int sz, zarray_t* cluster, image_u8_t* im) {
     return lfps;
 }
 
-static inline void ptsort(struct pt *pts, int sz)
+static inline void ptsort(cluster_pt_t *pts, int sz)
 {
 #define MAYBE_SWAP(arr,apos,bpos)                                   \
     if (pt_compare_angle(&(arr[apos]), &(arr[bpos])) > 0) {                        \
@@ -642,7 +655,7 @@ static inline void ptsort(struct pt *pts, int sz)
         return;
 
     if (sz == 2) {
-        struct pt tmp;
+        cluster_pt_t tmp;
         MAYBE_SWAP(pts, 0, 1);
         return;
     }
@@ -650,7 +663,7 @@ static inline void ptsort(struct pt *pts, int sz)
     // NB: Using less-branch-intensive sorting networks here on the
     // hunch that it's better for performance.
     if (sz == 3) { // 3 element bubble sort is optimal
-        struct pt tmp;
+        cluster_pt_t tmp;
         MAYBE_SWAP(pts, 0, 1);
         MAYBE_SWAP(pts, 1, 2);
         MAYBE_SWAP(pts, 0, 1);
@@ -658,7 +671,7 @@ static inline void ptsort(struct pt *pts, int sz)
     }
 
     if (sz == 4) { // 4 element optimal sorting network.
-        struct pt tmp;
+        cluster_pt_t tmp;
         MAYBE_SWAP(pts, 0, 1); // sort each half, like a merge sort
         MAYBE_SWAP(pts, 2, 3);
         MAYBE_SWAP(pts, 0, 2); // minimum value is now at 0.
@@ -669,7 +682,7 @@ static inline void ptsort(struct pt *pts, int sz)
     if (sz == 5) {
         // this 9-step swap is optimal for a sorting network, but two
         // steps slower than a generic sort.
-        struct pt tmp;
+        cluster_pt_t tmp;
         MAYBE_SWAP(pts, 0, 1); // sort each half (3+2), like a merge sort
         MAYBE_SWAP(pts, 3, 4);
         MAYBE_SWAP(pts, 1, 2);
@@ -686,15 +699,15 @@ static inline void ptsort(struct pt *pts, int sz)
 
     // a merge sort with temp storage.
 
-    struct pt *tmp = malloc(sizeof(struct pt) * sz);
+    cluster_pt_t *tmp = malloc(sizeof(cluster_pt_t) * sz);
 
-    memcpy(tmp, pts, sizeof(struct pt) * sz);
+    memcpy(tmp, pts, sizeof(cluster_pt_t) * sz);
 
     int asz = sz/2;
     int bsz = sz - asz;
 
-    struct pt *as = &tmp[0];
-    struct pt *bs = &tmp[asz];
+    cluster_pt_t *as = &tmp[0];
+    cluster_pt_t *bs = &tmp[asz];
 
     ptsort(as, asz);
     ptsort(bs, bsz);
@@ -716,9 +729,9 @@ static inline void ptsort(struct pt *pts, int sz)
     }
 
     if (apos < asz)
-        memcpy(&pts[outpos], &as[apos], (asz-apos)*sizeof(struct pt));
+        memcpy(&pts[outpos], &as[apos], (asz-apos)*sizeof(cluster_pt_t));
     if (bpos < bsz)
-        memcpy(&pts[outpos], &bs[bpos], (bsz-bpos)*sizeof(struct pt));
+        memcpy(&pts[outpos], &bs[bpos], (bsz-bpos)*sizeof(cluster_pt_t));
 
     free(tmp);
 
@@ -728,15 +741,15 @@ static inline void ptsort(struct pt *pts, int sz)
 // return 1 if the quad looks okay, 0 if it should be discarded
 int fit_quad(
         apriltag_detector_t *td,
-        image_u8_t *im,
-        zarray_t *cluster,
-        struct quad *quad,
+        const image_u8_t *im,
+        vec_cluster_pt_t *cluster,
+        atquad_t *quad,
         int tag_width,
         bool normal_border,
         bool reversed_border) {
     int res = 0;
 
-    int sz = zarray_size(cluster);
+    vec_size_t sz = vec_length(cluster);
     if (sz < 24) // Synchronize with later check.
         return 0;
 
@@ -747,15 +760,13 @@ int fit_quad(
 
     // compute a bounding box so that we can order the points
     // according to their angle WRT the center.
-    struct pt *p1;
-    zarray_get_volatile(cluster, 0, &p1);
+    cluster_pt_t *p1 = vec_get_ptr(cluster, 0);
     uint16_t xmax = p1->x;
     uint16_t xmin = p1->x;
     uint16_t ymax = p1->y;
     uint16_t ymin = p1->y;
-    for (int pidx = 1; pidx < zarray_size(cluster); pidx++) {
-        struct pt *p;
-        zarray_get_volatile(cluster, pidx, &p);
+    for (int pidx = 1; pidx < vec_length(cluster); pidx++) {
+        const cluster_pt_t *p = vec_get_ptr(cluster, pidx);
 
         if (p->x > xmax) {
             xmax = p->x;
@@ -786,9 +797,8 @@ int fit_quad(
 
     float quadrants[2][2] = {{-1*(2 << 15), 0}, {2*(2 << 15), 2 << 15}};
 
-    for (int pidx = 0; pidx < zarray_size(cluster); pidx++) {
-        struct pt *p;
-        zarray_get_volatile(cluster, pidx, &p);
+    for (int pidx = 0; pidx < vec_length(cluster); pidx++) {
+        cluster_pt_t *p = vec_get_ptr(cluster, pidx);
 
         float dx = p->x - cx;
         float dy = p->y - cy;
@@ -821,26 +831,21 @@ int fit_quad(
     // we now sort the points according to theta. This is a prepatory
     // step for segmenting them into four lines.
     if (1) {
-        ptsort((struct pt*) cluster->data, zarray_size(cluster));
+        ptsort(cluster->data, cluster->length);
 
         // remove duplicate points. (A byproduct of our segmentation system.)
         if (1) {
             int outpos = 1;
+            cluster_pt_t *last = vec_get_ptr(cluster, 0);
 
-            struct pt *last;
-            zarray_get_volatile(cluster, 0, &last);
+            for (vec_size_t i = 1; i < sz; i++) {
 
-            for (int i = 1; i < sz; i++) {
-
-                struct pt *p;
-                zarray_get_volatile(cluster, i, &p);
+                cluster_pt_t *p = vec_get_ptr(cluster, i);
 
                 if (p->x != last->x || p->y != last->y) {
 
                     if (i != outpos)  {
-                        struct pt *out;
-                        zarray_get_volatile(cluster, outpos, &out);
-                        memcpy(out, p, sizeof(struct pt));
+                        memcpy(vec_get_ptr(cluster, outpos), p, sizeof(*p));
                     }
 
                     outpos++;
@@ -849,7 +854,7 @@ int fit_quad(
                 last = p;
             }
 
-            cluster->size = outpos;
+            vec_truncate(cluster, outpos);
             sz = outpos;
         }
 
@@ -859,7 +864,7 @@ int fit_quad(
         return 0;
 
 
-    struct line_fit_pt *lfps = compute_lfps(sz, cluster, im);
+    line_fit_pt_t *lfps = compute_lfps(sz, cluster, im);
 
     int indices[4];
     if (1) {
@@ -1056,17 +1061,15 @@ static void do_quad_task(void *p)
 {
     struct quad_task *task = (struct quad_task*) p;
 
-    zarray_t *clusters = task->clusters;
-    zarray_t *quads = task->quads;
+    vec_multi_cluster_t *clusters = task->clusters;
+    vec_atquad_t *quads = &task->quads;
     apriltag_detector_t *td = task->td;
     int w = task->w, h = task->h;
 
     for (int cidx = task->cidx0; cidx < task->cidx1; cidx++) {
+        vec_cluster_pt_t *cluster = vec_get_ptr(clusters, cidx);
 
-        zarray_t *cluster;
-        zarray_get(clusters, cidx, &cluster);
-
-        if (zarray_size(cluster) < td->qtp.min_cluster_pixels)
+        if (vec_length(cluster) < td->qtp.min_cluster_pixels)
             continue;
 
         // a cluster should contain only boundary points around the
@@ -1075,16 +1078,16 @@ static void do_quad_task(void *p)
         // fit quads to.) A typical point along an edge is added three
         // times (because it has 3 neighbors). The maximum perimeter
         // is 2w+2h.
-        if (zarray_size(cluster) > 3*(2*w+2*h)) {
+        if (vec_length(cluster) > 3*(2*w+2*h)) {
             continue;
         }
 
-        struct quad quad;
+        atquad_t quad;
         memset(&quad, 0, sizeof(struct quad));
 
         if (fit_quad(td, task->im, cluster, &quad, task->tag_width, task->normal_border, task->reversed_border)) {
             pthread_mutex_lock(&td->mutex);
-            zarray_add(quads, &quad);
+            vec_push(quads, quad);
             pthread_mutex_unlock(&td->mutex);
         }
     }
@@ -1480,14 +1483,15 @@ unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim,
     return uf;
 }
 
-zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int w, int nclustermap, unionfind_t* uf, zarray_t* clusters) {
-    struct uint64_zarray_entry **clustermap = calloc(nclustermap, sizeof(struct uint64_zarray_entry*));
+void do_gradient_clusters(const image_u8_t* threshim, int ts, int y0, int y1, int w, int nclustermap, const unionfind_t* uf, vec_cluster_hash_ptr_t* clusters) {
+    cluster_id_t **clustermap = calloc(nclustermap, sizeof(cluster_id_t*));
 
     int mem_chunk_size = 2048;
-    struct uint64_zarray_entry** mem_pools = malloc(sizeof(struct uint64_zarray_entry *)*(1 + 2 * nclustermap / mem_chunk_size)); // SmodeTech: avoid memory corruption when nclustermap < mem_chunk_size
+    // SmodeTech: avoid memory corruption when nclustermap < mem_chunk_size
+    cluster_id_t** mem_pools = malloc(sizeof(cluster_id_t *)*(1 + 2 * nclustermap / mem_chunk_size));
     int mem_pool_idx = 0;
     int mem_pool_loc = 0;
-    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry));
+    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(cluster_hash_t));
 
     for (int y = y0; y < y1; y++) {
         for (int x = 1; x < w-1; x++) {
@@ -1537,7 +1541,7 @@ zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int
                                                                             \
                         /* XXX lousy hash function */                       \
                         uint32_t clustermap_bucket = u64hash_2(clusterid) % nclustermap; \
-                        struct uint64_zarray_entry *entry = clustermap[clustermap_bucket]; \
+                        cluster_id_t *entry = clustermap[clustermap_bucket]; \
                         while (entry && entry->id != clusterid) {           \
                             entry = entry->next;                            \
                         }                                                   \
@@ -1546,21 +1550,21 @@ zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int
                             if (mem_pool_loc == mem_chunk_size) {           \
                                 mem_pool_loc = 0;                           \
                                 mem_pool_idx++;                             \
-                                mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(struct uint64_zarray_entry)); \
+                                mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(cluster_id_t)); \
                             }                                               \
                             entry = mem_pools[mem_pool_idx] + mem_pool_loc; \
                             mem_pool_loc++;                                 \
                                                                             \
                             entry->id = clusterid;                          \
-                            entry->cluster = zarray_create(sizeof(struct pt)); \
+                            vec_init(entry);                                \
                             entry->next = clustermap[clustermap_bucket];    \
                             clustermap[clustermap_bucket] = entry;          \
                         }                                                   \
                                                                             \
-                        struct pt p = { .x = 2*x + dx, .y = 2*y + dy, .gx = dx*((int) v1-v0), .gy = dy*((int) v1-v0)}; \
-                        zarray_add(entry->cluster, &p);                     \
-                    }                                                   \
-                }                                                       \
+                        cluster_pt_t p = { .x = 2*x + dx, .y = 2*y + dy, .gx = dx*((int) v1-v0), .gy = dy*((int) v1-v0)}; \
+                        vec_push(entry, p);                                 \
+                    }                                                       \
+                }                                                           \
             }
 
             // do 4 connectivity. NB: Arguments must be [-1, 1] or we'll overflow .gx, .gy
@@ -1575,26 +1579,24 @@ zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int
 #undef DO_CONN
 
     for (int i = 0; i < nclustermap; i++) {
-        int start = zarray_size(clusters);
-        for (struct uint64_zarray_entry *entry = clustermap[i]; entry; entry = entry->next) {
-            struct cluster_hash* cluster_hash = malloc(sizeof(struct cluster_hash));
+        vec_size_t start = vec_length(clusters);
+        for (cluster_id_t *entry = clustermap[i]; entry; entry = entry->next) {
+            cluster_hash_t* cluster_hash = malloc(sizeof(cluster_hash_t));
             cluster_hash->hash = u64hash_2(entry->id) % nclustermap;
             cluster_hash->id = entry->id;
-            cluster_hash->data = entry->cluster;
-            zarray_add(clusters, &cluster_hash);
+            vec_swap_data(entry, cluster_hash);
+            vec_push(clusters, cluster_hash);
         }
-        int end = zarray_size(clusters);
+        vec_size_t end = vec_length(clusters);
 
         // Do a quick bubblesort on the secondary key.
         int n = end - start;
         for (int j = 0; j < n - 1; j++) {
             for (int k = 0; k < n - j - 1; k++) {
-                struct cluster_hash* hash1;
-                struct cluster_hash* hash2;
-                zarray_get(clusters, start + k, &hash1);
-                zarray_get(clusters, start + k + 1, &hash2);
+                cluster_hash_t* hash1 = vec_get(clusters, start + k);
+                cluster_hash_t* hash2 = vec_get(clusters, start + k + 1);
                 if (hash1->id > hash2->id) {
-                    struct cluster_hash tmp = *hash2;
+                    cluster_hash_t tmp = *hash2;
                     *hash2 = *hash1;
                     *hash1 = tmp;
                 }
@@ -1606,68 +1608,57 @@ zarray_t* do_gradient_clusters(image_u8_t* threshim, int ts, int y0, int y1, int
     }
     free(mem_pools);
     free(clustermap);
-
-    return clusters;
 }
 
 static void do_cluster_task(void *p)
 {
     struct cluster_task *task = (struct cluster_task*) p;
 
-    do_gradient_clusters(task->im, task->s, task->y0, task->y1, task->w, task->nclustermap, task->uf, task->clusters);
+    do_gradient_clusters(task->im, task->s, task->y0, task->y1, task->w, task->nclustermap, task->uf, &task->cluster_hashes);
 }
 
-zarray_t* merge_clusters(zarray_t* c1, zarray_t* c2) {
-    zarray_t* ret = zarray_create(sizeof(struct cluster_hash*));
-    zarray_ensure_capacity(ret, zarray_size(c1) + zarray_size(c2));
+void merge_clusters(vec_cluster_hash_ptr_t* c1, vec_cluster_hash_ptr_t* c2, vec_cluster_hash_ptr_t *out) {
+    vec_reserve(out, vec_length(c1) + vec_length(c2));
 
     int i1 = 0;
     int i2 = 0;
-    int l1 = zarray_size(c1);
-    int l2 = zarray_size(c2);
+    int l1 = vec_length(c1);
+    int l2 = vec_length(c2);
 
     while (i1 < l1 && i2 < l2) {
-        struct cluster_hash* h1;
-        struct cluster_hash* h2;
-        zarray_get(c1, i1, &h1);
-        zarray_get(c2, i2, &h2);
+        cluster_hash_t* h1 = vec_get(c1, i1);
+        cluster_hash_t* h2 = vec_get(c2, i2);
 
         if (h1->hash == h2->hash && h1->id == h2->id) {
-            zarray_add_all(h1->data, h2->data);
-            zarray_add(ret, &h1);
+            vec_extend(h2, h1);
+            vec_push(out, h1);
             i1++;
             i2++;
-            zarray_destroy(h2->data);
+            vec_deinit(h2);
             free(h2);
         } else if (h2->hash < h1->hash || (h2->hash == h1->hash && h2->id < h1->id)) {
-            zarray_add(ret, &h2);
+            vec_push(out, h2);
             i2++;
         } else {
-            zarray_add(ret, &h1);
+            vec_push(out, h1);
             i1++;
         }
     }
 
     for (; i1 < l1; i1++) {
-        struct cluster_hash* h1;
-        zarray_get(c1, i1, &h1);
-        zarray_add(ret, &h1);
+        cluster_hash_t* h1 = vec_get(c1, i1);
+        vec_push(out, h1);
     }
 
     for (; i2 < l2; i2++) {
-        struct cluster_hash* h2;
-        zarray_get(c2, i2, &h2);
-        zarray_add(ret, &h2);
+        cluster_hash_t* h2 = vec_get(c2, i2);
+        vec_push(out, h2);
     }
-
-    zarray_destroy(c1);
-    zarray_destroy(c2);
-
-    return ret;
+    vec_deinit(c1);
+    vec_deinit(c2);
 }
 
-zarray_t* gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts, unionfind_t* uf) {
-    zarray_t* clusters;
+void gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts, unionfind_t* uf, vec_multi_cluster_t *clusters) {
     int nclustermap = 0.2*w*h;
 
     int sz = h - 1;
@@ -1686,7 +1677,7 @@ zarray_t* gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w
         tasks[ntasks].uf = uf;
         tasks[ntasks].im = threshim;
         tasks[ntasks].nclustermap = nclustermap/(sz / chunksize + 1);
-        tasks[ntasks].clusters = zarray_create(sizeof(struct cluster_hash*));
+        vec_init(&tasks[ntasks].cluster_hashes);
 
         workerpool_add_task(td->wp, do_cluster_task, &tasks[ntasks]);
         ntasks++;
@@ -1694,49 +1685,47 @@ zarray_t* gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w
 
     workerpool_run(td->wp);
 
-    zarray_t** clusters_list = malloc(sizeof(zarray_t *)*ntasks);
+    vec_cluster_hash_ptr_t * clusters_list = malloc(sizeof(vec_cluster_hash_ptr_t) * ntasks);
     for (int i = 0; i < ntasks; i++) {
-        clusters_list[i] = tasks[i].clusters;
+        vec_swap_data(&clusters_list[i], &tasks[i].cluster_hashes);
     }
 
     int length = ntasks;
     while (length > 1) {
         int write = 0;
         for (int i = 0; i < length - 1; i += 2) {
-            clusters_list[write] = merge_clusters(clusters_list[i], clusters_list[i + 1]);
+            merge_clusters(&clusters_list[i], &clusters_list[i + 1], &clusters_list[write]);
             write++;
         }
 
         if (length % 2) {
-            clusters_list[write] = clusters_list[length - 1];
+            vec_swap_data(&clusters_list[write], &clusters_list[length - 1]);
         }
 
         length = (length >> 1) + length % 2;
     }
 
-    clusters = zarray_create(sizeof(zarray_t*));
-    zarray_ensure_capacity(clusters, zarray_size(clusters_list[0]));
-    for (int i = 0; i < zarray_size(clusters_list[0]); i++) {
-        struct cluster_hash* hash;
-        zarray_get(clusters_list[0], i, &hash);
-        zarray_add(clusters, &hash->data);
+    // Copy all point data from the hash list to the merged final list of points
+    vec_reserve(clusters, vec_length(&clusters_list[0]));
+    for (int i = 0; i < vec_length(&clusters_list[0]); i++) {
+        cluster_hash_t* hash = vec_get(&clusters_list[0], i);
+        vec_cluster_pt_t *cluster = vec_get_ptr(clusters, i);
+        vec_swap_data(cluster, hash);
         free(hash);
     }
-    zarray_destroy(clusters_list[0]);
+    vec_deinit(&clusters_list[0]);
     free(clusters_list);
     free(tasks);
-    return clusters;
 }
 
-zarray_t* fit_quads(apriltag_detector_t *td, int w, int h, zarray_t* clusters, image_u8_t* im) {
-    zarray_t *quads = zarray_create(sizeof(struct quad));
+void fit_quads(apriltag_detector_t *td, int w, int h, vec_multi_cluster_t * clusters, const image_u8_t* im, vec_atquad_t *quads) {
+    vec_clear(quads);
 
     bool normal_border = false;
     bool reversed_border = false;
     int min_tag_width = 1000000;
-    for (int i = 0; i < zarray_size(td->tag_families); i++) {
-        apriltag_family_t* family;
-        zarray_get(td->tag_families, i, &family);
+    for (vec_size_t i = 0; i < vec_length(&td->tag_families); i++) {
+        apriltag_family_t* family = td->tag_families.data[i];
         if (family->width_at_border < min_tag_width) {
             min_tag_width = family->width_at_border;
         }
@@ -1748,7 +1737,7 @@ zarray_t* fit_quads(apriltag_detector_t *td, int w, int h, zarray_t* clusters, i
         min_tag_width = 3;
     }
 
-    int sz = zarray_size(clusters);
+    size_t sz = vec_length(clusters);
     int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
     struct quad_task *tasks = malloc(sizeof(struct quad_task)*(sz / chunksize + 1));
 
@@ -1759,12 +1748,12 @@ zarray_t* fit_quads(apriltag_detector_t *td, int w, int h, zarray_t* clusters, i
         tasks[ntasks].cidx1 = imin(sz, i + chunksize);
         tasks[ntasks].h = h;
         tasks[ntasks].w = w;
-        tasks[ntasks].quads = quads;
-        tasks[ntasks].clusters = clusters;
         tasks[ntasks].im = im;
         tasks[ntasks].tag_width = min_tag_width;
         tasks[ntasks].normal_border = normal_border;
         tasks[ntasks].reversed_border = reversed_border;
+        tasks[ntasks].clusters = clusters;
+        vec_init(&tasks[ntasks].quads);
 
         workerpool_add_task(td->wp, do_quad_task, &tasks[ntasks]);
         ntasks++;
@@ -1773,11 +1762,9 @@ zarray_t* fit_quads(apriltag_detector_t *td, int w, int h, zarray_t* clusters, i
     workerpool_run(td->wp);
 
     free(tasks);
-
-    return quads;
 }
 
-zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
+void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t *quads)
 {
     ////////////////////////////////////////////////////////
     // step 1. threshold the image, creating the edge image.
@@ -1836,15 +1823,15 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     timeprofile_stamp(td->tp, "unionfind");
 
-    zarray_t* clusters = gradient_clusters(td, threshim, w, h, ts, uf);
+    vec_multi_cluster_t clusters;
+    vec_init(&clusters);
+    gradient_clusters(td, threshim, w, h, ts, uf, &clusters);
 
     if (td->debug) {
         image_u8x3_t *d = image_u8x3_create(w, h);
 
-        for (int i = 0; i < zarray_size(clusters); i++) {
-            zarray_t *cluster;
-            zarray_get(clusters, i, &cluster);
-
+        for (vec_size_t i = 0, isz = vec_length(&clusters); i < isz; i++) {
+            vec_cluster_pt_t *cluster = vec_get_ptr(&clusters, i);
             uint32_t r, g, b;
 
             if (1) {
@@ -1854,9 +1841,8 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
                 b = bias + (random() % (200-bias));
             }
 
-            for (int j = 0; j < zarray_size(cluster); j++) {
-                struct pt *p;
-                zarray_get_volatile(cluster, j, &p);
+            for (int j = 0, jsz = vec_length(cluster); j < jsz; j++) {
+                cluster_pt_t *p = vec_get_ptr(cluster, j);
 
                 int x = p->x / 2;
                 int y = p->y / 2;
@@ -1877,7 +1863,7 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
     ////////////////////////////////////////////////////////
     // step 3. process each connected component.
 
-    zarray_t* quads = fit_quads(td, w, h, clusters, im);
+    fit_quads(td, w, h, &clusters, im, quads);
 
     if (td->debug) {
         FILE *f = fopen("debug_lines.ps", "w");
@@ -1897,9 +1883,8 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
         image_u8_destroy(im2);
 
-        for (int i = 0; i < zarray_size(quads); i++) {
-            struct quad *q;
-            zarray_get_volatile(quads, i, &q);
+        for (int i = 0; i < vec_length(quads); i++) {
+            atquad_t *q = &quads->data[i];
 
             float rgb[3];
             int bias = 100;
@@ -1923,12 +1908,9 @@ zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im)
 
     unionfind_destroy(uf);
 
-    for (int i = 0; i < zarray_size(clusters); i++) {
-        zarray_t *cluster;
-        zarray_get(clusters, i, &cluster);
-        zarray_destroy(cluster);
+    for (int i = 0; i < vec_length(&clusters); i++) {
+        vec_cluster_pt_t *cluster_pts = vec_get_ptr(&clusters, i);
+        vec_deinit(cluster_pts);
     }
-    zarray_destroy(clusters);
-
-    return quads;
+    vec_deinit(&clusters);
 }

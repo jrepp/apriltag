@@ -98,13 +98,17 @@ int main(int argc, char *argv[])
     }
 
 
-    apriltag_detector_t *td = apriltag_detector_create();
-    apriltag_detector_add_family(td, tf);
-    td->quad_decimate = getopt_get_double(getopt, "decimate");
-    td->quad_sigma = getopt_get_double(getopt, "blur");
-    td->nthreads = getopt_get_int(getopt, "threads");
-    td->debug = getopt_get_bool(getopt, "debug");
-    td->refine_edges = getopt_get_bool(getopt, "refine-edges");
+    apriltag_detector_t td;
+    apriltag_detector_init(&td);
+    apriltag_detector_add_family(&td, tf);
+    td.quad_decimate = getopt_get_double(getopt, "decimate");
+    td.quad_sigma = getopt_get_double(getopt, "blur");
+    td.nthreads = getopt_get_int(getopt, "threads");
+    td.debug = getopt_get_bool(getopt, "debug");
+    td.refine_edges = getopt_get_bool(getopt, "refine-edges");
+
+    vec_apriltag_detection_t detections;
+    vec_init(&detections);
 
     Mat frame, gray;
     while (true) {
@@ -118,12 +122,11 @@ int main(int argc, char *argv[])
             .buf = gray.data
         };
 
-        zarray_t *detections = apriltag_detector_detect(td, &im);
+        apriltag_detector_detect(&td, &im, &detections);
 
         // Draw detection outlines
-        for (int i = 0; i < zarray_size(detections); i++) {
-            apriltag_detection_t *det;
-            zarray_get(detections, i, &det);
+        for (int i = 0; i < vec_length(&detections); i++) {
+            apriltag_detection_t *det = vec_get(&detections, i);
             line(frame, Point(det->p[0][0], det->p[0][1]),
                      Point(det->p[1][0], det->p[1][1]),
                      Scalar(0, 0xff, 0), 2);
@@ -149,14 +152,14 @@ int main(int argc, char *argv[])
                                        det->c[1]+textsize.height/2),
                     fontface, fontscale, Scalar(0xff, 0x99, 0), 2);
         }
-        apriltag_detections_destroy(detections);
 
         imshow("Tag Detections", frame);
         if (waitKey(30) >= 0)
             break;
     }
 
-    apriltag_detector_destroy(td);
+    vec_deinit(&detections);
+    apriltag_detector_destroy(&td);
 
     if (!strcmp(famname, "tag36h11")) {
         tag36h11_destroy(tf);

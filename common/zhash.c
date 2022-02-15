@@ -417,38 +417,32 @@ void zhash_vmap_values(zhash_t * zh, void (*f)())
     }
 }
 
-zarray_t *zhash_keys(const zhash_t *zh)
+void zhash_keys(const zhash_t *zh, vec_void_t *keys)
 {
     assert(zh != NULL);
 
-    zarray_t *za = zarray_create(zh->keysz);
-
+    vec_clear(keys);
     zhash_iterator_t itr;
     zhash_iterator_init_const(zh, &itr);
 
     void *key, *value;
     while(zhash_iterator_next_volatile(&itr, &key, &value)) {
-        zarray_add(za, key);
+        vec_push(keys, key);
     }
-
-    return za;
 }
 
-zarray_t *zhash_values(const zhash_t *zh)
+void zhash_values(const zhash_t *zh, vec_void_t *values)
 {
     assert(zh != NULL);
 
-    zarray_t *za = zarray_create(zh->valuesz);
-
+    vec_clear(values);
     zhash_iterator_t itr;
     zhash_iterator_init_const(zh, &itr);
 
     void *key, *value;
     while(zhash_iterator_next_volatile(&itr, &key, &value)) {
-        zarray_add(za, value);
+        vec_push(values, value);
     }
-
-    return za;
 }
 
 

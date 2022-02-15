@@ -1,8 +1,10 @@
 /** 
- * Copyright (c) 2014 rxi
+ * Copyright (c) 2014 rxi (https://github.com/rxi/vec)
+ *
+ * v0.3.x modifications (c) 2022 Jacob Repp (https://github.com/jrepp/vec)
  *
  * This library is free software; you can redistribute it and/or modify it
- * under the terms of the MIT license. See LICENSE for details.
+ * under the terms of the MIT license. See https://github.com/rxi/vec/LICENSE for details.
  */
 
 #ifndef INCLUDED_VEC_H
@@ -17,7 +19,7 @@ extern "C" {
 // definitions of allocation, size, alignment and vector growth.
 //
 #if !defined(VEC_CONFIG_H)
-#define VEC_CONFIG_H "vec_config_default.h"
+#define VEC_CONFIG_H "vec_config_apriltag.h"
 #endif
 
 #include VEC_CONFIG_H
@@ -50,8 +52,9 @@ extern "C" {
 //
 // Options for vectors
 //
-#define VEC_OWNS_MEMORY 0x10
-#define VEC_ALLOW_REALLOC 0x20
+#define VEC_OWNS_MEMORY     0x10
+#define VEC_ALLOW_REALLOC   0x20
+#define VEC_OOM             0x01
 
 //
 // Combinations of options for vector initialization
@@ -60,6 +63,14 @@ extern "C" {
 #define VEC_FIXED_REALLOC (VEC_ALLOW_REALLOC)
 #define VEC_FIXED (0)
 
+
+// Optionally add assert into array access, the statement remains unchanged but
+// but will break before access the array out of bounds.
+#if defined(VEC_USE_CHECKED_ACCESS)
+#define VEC_CHECK(v, i) assert(i < (v)->length)
+#else
+#define VEC_CHECK(v, i) ((void)1)
+#endif // VEC_USE_CHECKED_ACCESS
 
 //
 // Count the dimensions of a fixed array
@@ -104,6 +115,11 @@ extern "C" {
 
 // Capacity of vector in elements
 #define vec_capacity(v) ((v)->capacity)
+
+
+// True when the vector has observed an oom condition, useful for error checking
+// after batch operations such as pusharr that don't have a natural return code.
+#define vec_oom(v) (((v)->options & VEC_OOM) == VEC_OOM)
 
 
 // Availability of vector in elements
@@ -182,19 +198,43 @@ extern "C" {
   ((v)->length = 0)
 
 
-// Return the first element (assumes length > 0)
-#define vec_first(v) \
-  ((v)->data[0])
-
-
 // True when the vector is empty
 #define vec_empty(v) \
   ((v)->length == 0)
 
 
+// Get an element at index
+#define vec_get(v, i) \
+  ((v)->data[(VEC_CHECK(v, i), i)])
+
+
+// Get an element by pointer at index
+#define vec_get_ptr(v, i) \
+  (&((v)->data[(VEC_CHECK(v, i), i)]))
+
+
+// Return the first element (assumes length > 0)
+#define vec_first(v) \
+  ((v)->data[(VEC_CHECK(v, 0), 0)])
+
+
 // Returns the last element (assumes length > 0)
 #define vec_last(v) \
-  ((v)->data[(v)->length - 1])
+  ((v)->data[(VEC_CHECK(v, (v)->length - 1), (v)->length - 1)])
+
+
+// Swap the data of src into dst, releasing dst before the swap
+#define vec_swap_data(dst, src)        \
+  do {                                 \
+    if (((dst)->data) == ((src)->data))    \
+      break;                           \
+    vec_deinit(dst);                   \
+    (dst)->data     = (src)->data;     \
+    (dst)->options  = (src)->options;  \
+    (dst)->length   = (src)->length;   \
+    (dst)->capacity = (src)->capacity; \
+    vec_init(src);                     \
+  } while(0);
 
 
 // Reserve space for `n` elements
@@ -267,6 +307,21 @@ extern "C" {
     }                                              \
   } while (0)
 
+
+// Simply execute a function on each valid element of v
+#define vec_each(v, f, ...) \
+ for (vec_size_t i__ = 0, l__ = vec_length(v); i__ < l__; ++i__) { \
+    (void)f((v)->data[i__] , ## __VA_ARGS__ );  \
+  }
+
+
+// Simply execute a function on each valid element of v by pointer
+#define vec_each_ptr(v, f, ...) \
+ for (vec_size_t i__ = 0, l__ = vec_length(v); i__ < l__; ++i__) { \
+    (void)f(&((v)->data[i__]) , ## __VA_ARGS__ );     \
+  }
+
+
 // Iterate over each element of the vector, `var` is the element and `iter` is the index
 #define vec_foreach(v, var, iter)                                  \
   if ((v)->length > 0)                                             \
@@ -297,6 +352,104 @@ extern "C" {
     for ((iter) = (v)->length - 1;                         \
          (iter) >= 0 && (((var) = &(v)->data[(iter)]), 1); \
          --(iter))
+
+
+
+// Apply v2[i] = f(v[i], ...) for each element v
+#define vec_map(dst, src, f, ...) \
+  do {                    \
+    if (VEC_OK != vec_reserve((dst), vec_length(src))) { \
+      break;                   \
+    } \
+    (dst)->length = (src)->length; \
+    VEC_TYPEOF((src)->data[0]) *s__ = &(src)->data[0], \
+                               *e__ = &(src)->data[(src)->length], \
+                               *d__ = &(dst)->data[0]; \
+    for (; s__ < e__; ++s__, ++d__) { \
+      *d__ = (f)(*s__ , ## __VA_ARGS__ );                        \
+    } \
+  } while(0);
+
+
+// Apply dst[i] = f(src[i], ...) for each element v in reverse
+#define vec_map_rev(dst, src, f, ...) \
+  do {                             \
+    if (VEC_OK != vec_reserve((dst), vec_length(src))) { \
+      break;                                \
+    }; \
+    (dst)->length = (src)->length;    \
+    VEC_TYPEOF((src)->data[0]) *s__ = &(src)->data[(src)->length - 1], \
+                               *e__ = &(src)->data[-1],  \
+                               *d__ = &(dst)->data[0]; \
+    for (; s__ > e__; --s__, ++d__) { \
+      *d__ = (f)(*s__, ##__VA_ARGS__); \
+    } \
+  } while (0);
+
+
+// Apply dst[i] = f(&src[i], ...) for each element of v
+#define vec_map_ptr(dst, src, f, ...) \
+  do {                    \
+    if (VEC_OK != vec_reserve((dst), vec_length(src))) { \
+      break;                         \
+    } \
+    (dst)->length = (src)->length; \
+    VEC_TYPEOF((src)->data[0]) *s__ = &(src)->data[0], \
+                               *e__ = &(src)->data[(src)->length], \
+                               *d__ = &(dst)->data[0]; \
+    for (; s__ < e__; ++s__, ++d__) { \
+      *d__ = (f)(s__, ## __VA_ARGS__ );                        \
+    } \
+  } while(0);
+
+
+// Apply dst[i] = f(&src[i], ...) for each element of v in reverse
+#define vec_map_ptr_rev(dst, src, f, ...) \
+  do {                                 \
+    if (VEC_OK != vec_reserve((dst), vec_length(src))) { \
+      break;                               \
+    } \
+    (dst)->length = (src)->length; \
+    VEC_TYPEOF((src)->data[0]) *s__ = &(src)->data[(src)->length - 1], \
+                               *e__ = &(src)->data[-1],       \
+                               *d__ = &(dst)->data[0];   \
+    for (; s__ > e__; --s__, ++d__) { \
+      *d__ = (f)(s__, ##__VA_ARGS__); \
+    }                                    \
+  } while (0);
+
+
+// Apply ov = f(v[i], ov) for each element of v
+#define vec_fold(v, ov, f, ...) \
+  do {                     \
+    VEC_TYPEOF((v)->data[0]) *s__ = &(v)->data[0], \
+                             *e__ = &(v)->data[(v)->length]; \
+    for (; s__ < e__; ++s__) { \
+      ov = (f)(ov, *s__ , ## __VA_ARGS__ );                       \
+    } \
+  } while(0);
+
+
+// Apply ov = f(&v[i], ov) for each element of v
+#define vec_fold_ptr(v, ov, f, ...) \
+  do {                     \
+    VEC_TYPEOF((v)->data[0]) *s__ = &(v)->data[0], \
+                             *e__ = &(v)->data[(v)->length]; \
+    for (; s__ < e__; ++s__) { \
+      ov = (f)(ov, s__ , ## __VA_ARGS__ );                       \
+    } \
+  } while(0);
+
+
+// Apply (expr) (v[i]) for each element of v
+#define vec_fold_expr(v, expr, ...) \
+  do {                     \
+    VEC_TYPEOF((v)->data[0]) *s__ = &(v)->data[0], \
+                             *e__ = &(v)->data[(v)->length]; \
+    for (; s__ < e__; ++s__) { \
+      expr (*s__ , ## __VA_ARGS__ );                       \
+    } \
+  } while(0);
 
 
 int VEC_API(vec_expand_)(uint8_t **data, vec_size_t *options, const size_t *length, vec_size_t *capacity, vec_size_t memsz);

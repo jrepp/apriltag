@@ -34,7 +34,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <stdio.h>
 
 #include "string_util.h"
-#include "zarray.h"
+#include "vec.h"
 
 struct string_buffer
 {
@@ -146,12 +146,11 @@ int str_diff_idx(const char * a, const char * b)
 }
 
 
-zarray_t *str_split(const char *str, const char *delim)
+void str_split(const char *str, const char *delim, vec_str_t *parts)
 {
     assert(str != NULL);
     assert(delim != NULL);
 
-    zarray_t *parts = zarray_create(sizeof(char*));
     string_buffer_t *sb = string_buffer_create();
 
     size_t delim_len = strlen(delim);
@@ -164,7 +163,7 @@ zarray_t *str_split(const char *str, const char *delim)
             // never add empty strings (repeated tokens)
             if (string_buffer_size(sb) > 0) {
                 char *part = string_buffer_to_string(sb);
-                zarray_add(parts, &part);
+                vec_push(parts, part);
             }
             string_buffer_reset(sb);
         } else {
@@ -175,17 +174,15 @@ zarray_t *str_split(const char *str, const char *delim)
 
     if (string_buffer_size(sb) > 0) {
         char *part = string_buffer_to_string(sb);
-        zarray_add(parts, &part);
+        vec_push(parts, part);
     }
 
     string_buffer_destroy(sb);
-    return parts;
 }
 
 // split on one or more spaces.
-zarray_t *str_split_spaces(const char *str)
+void str_split_spaces(const char *str, vec_str_t *parts)
 {
-  zarray_t *parts = zarray_create(sizeof(char*));
   size_t len = strlen(str);
   size_t pos = 0;
 
@@ -206,20 +203,18 @@ zarray_t *str_split_spaces(const char *str)
       char *tok = malloc(len_off + 1);
       memcpy(tok, &str[off0], len_off);
       tok[len_off] = 0;
-      zarray_add(parts, &tok);
+      vec_push(parts, tok);
     }
   }
-
-  return parts;
 }
 
-void str_split_destroy(zarray_t *za)
+void str_split_destroy(vec_str_t *za)
 {
     if (!za)
         return;
 
-    zarray_vmap(za, free);
-    zarray_destroy(za);
+    vec_each(za, free);
+    vec_deinit(za);
 }
 
 char *str_trim(char *str)

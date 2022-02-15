@@ -43,9 +43,19 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "math_util.h"
 #include "string_util.h"
 
+typedef struct task
+{
+    void (*f)(void *p);
+    void *p;
+} task_t;
+
+typedef struct {
+    vec_define_fields(task_t)
+} vec_task_t;
+
 struct workerpool {
     int nthreads;
-    zarray_t *tasks;
+    vec_task_t tasks;
     int taskspos;
 
     pthread_t *threads;
@@ -58,11 +68,6 @@ struct workerpool {
     int end_count; // how many threads are done?
 };
 
-struct task
-{
-    void (*f)(void *p);
-    void *p;
-};
 
 void *worker_thread(void *p)
 {
@@ -74,7 +79,7 @@ void *worker_thread(void *p)
         struct task *task;
 
         pthread_mutex_lock(&wp->mutex);
-        while (wp->taskspos == zarray_size(wp->tasks)) {
+        while (wp->taskspos == vec_length(&wp->tasks)) {
             wp->end_count++;
 //          printf("%"PRId64" thread %d did %d\n", utime_now(), pthread_self(), cnt);
             pthread_cond_broadcast(&wp->endcond);
@@ -83,7 +88,7 @@ void *worker_thread(void *p)
 //            printf("%"PRId64" thread %d awake\n", utime_now(), pthread_self());
         }
 
-        zarray_get_volatile(wp->tasks, wp->taskspos, &task);
+        task = &wp->tasks.data[wp->taskspos];
         wp->taskspos++;
         cnt++;
         pthread_mutex_unlock(&wp->mutex);
@@ -106,7 +111,7 @@ workerpool_t *workerpool_create(int nthreads)
 
     workerpool_t *wp = calloc(1, sizeof(workerpool_t));
     wp->nthreads = nthreads;
-    wp->tasks = zarray_create(sizeof(struct task));
+    vec_init(&wp->tasks);
 
     if (nthreads > 1) {
         wp->threads = calloc(wp->nthreads, sizeof(pthread_t));
@@ -150,7 +155,7 @@ void workerpool_destroy(workerpool_t *wp)
         free(wp->threads);
     }
 
-    zarray_destroy(wp->tasks);
+    vec_deinit(&wp->tasks);
     free(wp);
 }
 
@@ -165,18 +170,17 @@ void workerpool_add_task(workerpool_t *wp, void (*f)(void *p), void *p)
     t.f = f;
     t.p = p;
 
-    zarray_add(wp->tasks, &t);
+    vec_push(&wp->tasks, t);
 }
 
 void workerpool_run_single(workerpool_t *wp)
 {
-    for (int i = 0; i < zarray_size(wp->tasks); i++) {
-        struct task *task;
-        zarray_get_volatile(wp->tasks, i, &task);
+    for (int i = 0; i < vec_length(&wp->tasks); i++) {
+        struct task *task = vec_get_ptr(&wp->tasks, i);
         task->f(task->p);
     }
 
-    zarray_clear(wp->tasks);
+    vec_clear(&wp->tasks);
 }
 
 // runs all added tasks, waits for them to complete.
@@ -197,7 +201,7 @@ void workerpool_run(workerpool_t *wp)
 
         wp->taskspos = 0;
 
-        zarray_clear(wp->tasks);
+        vec_clear(&wp->tasks);
 
     } else {
         workerpool_run_single(wp);

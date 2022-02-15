@@ -27,7 +27,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 
 #pragma once
 
-#include "zarray.h"
+#include "vec.h"
 #include "string_util.h"
 
 #ifdef __cplusplus
@@ -57,7 +57,7 @@ int getopt_get_int(getopt_t *getopt, const char *lname);
 int getopt_get_bool(getopt_t *getopt, const char *lname);
 double getopt_get_double(getopt_t *getopt, const char *lname);
 int getopt_was_specified(getopt_t *gopt, const char *lname);
-const zarray_t *getopt_get_extra_args(getopt_t *gopt);
+const vec_str_t* getopt_get_extra_args(getopt_t *gopt);
 
 #ifdef __cplusplus
 }

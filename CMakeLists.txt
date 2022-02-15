@@ -177,5 +177,10 @@ else()
     message(WARNING "OpenCV not found: Not building demo")
 endif(OpenCV_FOUND)
 
+# g2d_test
+add_executable(g2d_test example/g2d_test.c common/g2d.c common/time_util.c common/math_util.h common/matd.c common/vec.c common/svd22.c)
+target_include_directories(g2d_test PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(g2d_test m)
+
 # install example programs
 install(TARGETS apriltag_demo RUNTIME DESTINATION bin)

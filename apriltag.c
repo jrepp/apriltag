@@ -72,7 +72,7 @@ static inline long int random(void)
 
 #define APRILTAG_U64_ONE ((uint64_t) 1)
 
-extern zarray_t *apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im);
+extern void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t *quads);
 
 // Regresses a model of the form:
 // intensity(x,y) = C0*x + C1*y + CC2
@@ -289,7 +289,7 @@ static void quick_decode_init(apriltag_family_t *family, int maxhamming)
 }
 
 // returns an entry with hamming set to 255 if no decode was found.
-static void quick_decode_codeword(apriltag_family_t *tf, uint64_t rcode,
+static void quick_decode_codeword(const apriltag_family_t *tf, uint64_t rcode,
                                   struct quick_decode_entry *entry)
 {
     struct quick_decode *qd = (struct quick_decode*) tf->impl;
@@ -324,28 +324,25 @@ static inline int detection_compare_function(const void *_a, const void *_b)
     return a->id - b->id;
 }
 
-void apriltag_detector_remove_family(apriltag_detector_t *td, const apriltag_family_t *fam)
+void apriltag_detector_remove_family(apriltag_detector_t *td, apriltag_family_t *fam)
 {
     quick_decode_uninit(fam);
-    zarray_remove_value(td->tag_families, &fam, 0);
+    vec_remove(&td->tag_families, fam);
 }
 
-void apriltag_detector_add_family_bits(apriltag_detector_t *td, const apriltag_family_t *fam, int bits_corrected)
+void apriltag_detector_add_family_bits(apriltag_detector_t *td, apriltag_family_t *fam, int bits_corrected)
 {
-    zarray_add(td->tag_families, &fam);
-
+    vec_push(&td->tag_families, fam);
     if (!fam->impl)
         quick_decode_init(fam, bits_corrected);
 }
 
 void apriltag_detector_clear_families(apriltag_detector_t *td)
 {
-    for (int i = 0; i < zarray_size(td->tag_families); i++) {
-        apriltag_family_t *fam;
-        zarray_get(td->tag_families, i, &fam);
-        quick_decode_uninit(fam);
+    for (int i = 0; i < vec_length(&td->tag_families); i++) {
+        quick_decode_uninit(td->tag_families.data[i]);
     }
-    zarray_clear(td->tag_families);
+    vec_clear(&td->tag_families);
 }
 
 int apriltag_detector_init(apriltag_detector_t *td)
@@ -396,11 +393,11 @@ void apriltag_detector_destroy(apriltag_detector_t *td)
 struct quad_decode_task
 {
     int i0, i1;
-    zarray_t *quads;
+    vec_atquad_t quads;
     apriltag_detector_t *td;
 
     image_u8_t *im;
-    zarray_t *detections;
+    vec_apriltag_detection_t *detections;
 
     image_u8_t *im_samples;
 };
@@ -479,8 +476,6 @@ static matd_t* homography_compute2(double c[4][4]) {
 // returns non-zero if an error occurs (i.e., H has no inverse)
 static int quad_update_homographies(struct quad *quad)
 {
-    //zarray_t *correspondences = zarray_create(sizeof(float[4]));
-
     double corr_arr[4][4];
 
     for (int i = 0; i < 4; i++) {
@@ -506,7 +501,7 @@ static int quad_update_homographies(struct quad *quad)
     return -1;
 }
 
-static double value_for_pixel(image_u8_t *im, double px, double py) {
+static double value_for_pixel(const image_u8_t *im, double px, double py) {
     int x1 = floor(px - 0.5);
     int x2 = ceil(px - 0.5);
     double x = px - 0.5 - x1;
@@ -555,7 +550,7 @@ static void sharpen(apriltag_detector_t* td, double* values, int size) {
 }
 
 // returns the decision margin. Return < 0 if the detection should be rejected.
-static float quad_decode(apriltag_detector_t* td, apriltag_family_t *family, image_u8_t *im, struct quad *quad, struct quick_decode_entry *entry, image_u8_t *im_samples)
+static float quad_decode(apriltag_detector_t* td, const apriltag_family_t *family, const image_u8_t *im, struct quad *quad, struct quick_decode_entry *entry, image_u8_t *im_samples)
 {
     // decode the tag binary contents by sampling the pixel
     // closest to the center of each bit cell.
@@ -884,8 +879,7 @@ static void quad_decode_task(void *_u)
     image_u8_t *im = task->im;
 
     for (int quadidx = task->i0; quadidx < task->i1; quadidx++) {
-        struct quad *quad_original;
-        zarray_get_volatile(task->quads, quadidx, &quad_original);
+        atquad_t *quad_original = &task->quads.data[quadidx];
 
         // refine edges is not dependent upon the tag family, thus
         // apply this optimization BEFORE the other work.
@@ -898,9 +892,8 @@ static void quad_decode_task(void *_u)
         if (quad_update_homographies(quad_original))
             continue;
 
-        for (int famidx = 0; famidx < zarray_size(td->tag_families); famidx++) {
-            apriltag_family_t *family;
-            zarray_get(td->tag_families, famidx, &family);
+        for (int famidx = 0; famidx < vec_length(&td->tag_families); famidx++) {
+            const apriltag_family_t *family = td->tag_families.data[famidx];
 
             if (family->reversed_border != quad_original->reversed_border) {
                 continue;
@@ -956,7 +949,7 @@ static void quad_decode_task(void *_u)
                 }
 
                 pthread_mutex_lock(&td->mutex);
-                zarray_add(task->detections, &det);
+                vec_push(task->detections, det);
                 pthread_mutex_unlock(&td->mutex);
             }
 
@@ -1063,22 +1056,23 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
     if (td->debug)
         image_u8_write_pnm(quad_im, "debug_preprocess.pnm");
 
-    zarray_t *quads = apriltag_quad_thresh(td, quad_im);
+    vec_atquad_t quads;
+    vec_init(&quads);
+    apriltag_quad_thresh(td, quad_im, &quads);
 
     // adjust centers of pixels so that they correspond to the
     // original full-resolution image.
     if (td->quad_decimate > 1) {
-        for (int i = 0; i < zarray_size(quads); i++) {
-            struct quad *q;
-            zarray_get_volatile(quads, i, &q);
+        for (int i = 0; i < vec_length(&quads); i++) {
+            atquad_t *q = &quads.data[i];
 
             for (int j = 0; j < 4; j++) {
                 if (td->quad_decimate == 1.5) {
                     q->p[j][0] *= td->quad_decimate;
                     q->p[j][1] *= td->quad_decimate;
                 } else {
-                    q->p[j][0] = (q->p[j][0] - 0.5)*td->quad_decimate + 0.5;
-                    q->p[j][1] = (q->p[j][1] - 0.5)*td->quad_decimate + 0.5;
+                    q->p[j][0] = (q->p[j][0] - 0.5) * td->quad_decimate + 0.5;
+                    q->p[j][1] = (q->p[j][1] - 0.5) * td->quad_decimate + 0.5;
                 }
             }
         }
@@ -1087,7 +1081,7 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
     if (quad_im != im_orig)
         image_u8_destroy(quad_im);
 
-    td->nquads = zarray_size(quads);
+    td->nquads = vec_length(&quads);
 
     timeprofile_stamp(td->tp, "quads");
 
@@ -1098,9 +1092,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         srandom(0);
 
-        for (int i = 0; i < zarray_size(quads); i++) {
-            struct quad *quad;
-            zarray_get_volatile(quads, i, &quad);
+        for (int i = 0; i < vec_length(&quads); i++) {
+            atquad_t *quad = &quads.data[i];
 
             const int bias = 100;
             int color = bias + (random() % (255-bias));
@@ -1120,14 +1113,14 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
     if (1) {
         image_u8_t *im_samples = td->debug ? image_u8_copy(im_orig) : NULL;
 
-        int chunksize = 1 + zarray_size(quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+        int chunksize = 1 + vec_length(&quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
 
-        struct quad_decode_task *tasks = malloc(sizeof(struct quad_decode_task)*(zarray_size(quads) / chunksize + 1));
+        struct quad_decode_task *tasks = malloc(sizeof(struct quad_decode_task)*(vec_length(&quads) / chunksize + 1));
 
         int ntasks = 0;
-        for (int i = 0; i < zarray_size(quads); i+= chunksize) {
+        for (int i = 0; i < vec_length(&quads); i+= chunksize) {
             tasks[ntasks].i0 = i;
-            tasks[ntasks].i1 = imin(zarray_size(quads), i + chunksize);
+            tasks[ntasks].i1 = imin(vec_length(&quads), i + chunksize);
             tasks[ntasks].quads = quads;
             tasks[ntasks].td = td;
             tasks[ntasks].im = im_orig;
@@ -1156,9 +1149,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         srandom(0);
 
-        for (int i = 0; i < zarray_size(quads); i++) {
-            struct quad *quad;
-            zarray_get_volatile(quads, i, &quad);
+        for (int i = 0; i < vec_length(&quads); i++) {
+            atquad_t *quad = vec_get_ptr(&quads, i);
 
             const int bias = 100;
             int color = bias + (random() % (255-bias));
@@ -1180,29 +1172,28 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
     // Step 3. Reconcile detections--- don't report the same tag more
     // than once. (Allow non-overlapping duplicate detections.)
     if (1) {
-        zarray_t *poly0 = g2d_polygon_create_zeros(4);
-        zarray_t *poly1 = g2d_polygon_create_zeros(4);
+        g2d_poly_t poly0, poly1;
+        g2d_polygon_create_zeros(4, &poly0);
+        g2d_polygon_create_zeros(4, &poly1);
 
-        for (int i0 = 0; i0 < zarray_size(detections); i0++) {
+        for (int i0 = 0; i0 < vec_length(detections); i0++) {
+            apriltag_detection_t *det0 = detections->data[i0];
 
-            apriltag_detection_t *det0;
-            zarray_get(detections, i0, &det0);
-
-            for (int k = 0; k < 4; k++)
-                zarray_set(poly0, k, det0->p[k], NULL);
-
-            for (int i1 = i0+1; i1 < zarray_size(detections); i1++) {
-
-                apriltag_detection_t *det1;
-                zarray_get(detections, i1, &det1);
+            for (int k = 0; k < 4; k++) {
+                poly0.data[k].x = det0->p[k][0];
+                poly0.data[k].y = det0->p[k][1];
+            }
+            for (int i1 = i0+1; i1 < vec_length(detections); i1++) {
+                apriltag_detection_t *det1 = detections->data[i1];
 
                 if (det0->id != det1->id || det0->family != det1->family)
                     continue;
 
-                for (int k = 0; k < 4; k++)
-                    zarray_set(poly1, k, det1->p[k], NULL);
-
-                if (g2d_polygon_overlaps_polygon(poly0, poly1)) {
+                for (int k = 0; k < 4; k++) {
+                    poly1.data[k].x = det1->p[k][0];
+                    poly1.data[k].y = det1->p[k][1];
+                }
+                if (g2d_polygon_overlaps_polygon(&poly0, &poly1)) {
                     // the tags overlap. Delete one, keep the other.
 
                     int pref = 0; // 0 means undecided which one we'll keep.
@@ -1222,16 +1213,17 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
                         printf("uh oh, no preference for overlappingdetection\n");
                     }
 
+                    // TODO-jrepp: fix these splice replace lines
                     if (pref < 0) {
                         // keep det0, destroy det1
                         apriltag_detection_destroy(det1);
-                        zarray_remove_index(detections, i1, 1);
+                        vec_splice(detections, i1, 1);
                         i1--; // retry the same index
                         goto retry1;
                     } else {
                         // keep det1, destroy det0
                         apriltag_detection_destroy(det0);
-                        zarray_remove_index(detections, i0, 1);
+                        vec_splice(detections, i0, 1);
                         i0--; // retry the same index.
                         goto retry0;
                     }
@@ -1243,8 +1235,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
           retry0: ;
         }
 
-        zarray_destroy(poly0);
-        zarray_destroy(poly1);
+        vec_deinit(&poly0);
+        vec_deinit(&poly1);
     }
 
     timeprofile_stamp(td->tp, "reconcile");
@@ -1268,9 +1260,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         image_u8_destroy(darker);
 
-        for (int i = 0; i < zarray_size(detections); i++) {
-            apriltag_detection_t *det;
-            zarray_get(detections, i, &det);
+        for (int i = 0; i < vec_length(detections); i++) {
+            apriltag_detection_t *det = detections->data[i];
 
             float rgb[3];
             int bias = 100;
@@ -1308,9 +1299,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         image_u8_destroy(darker);
 
-        for (int i = 0; i < zarray_size(detections); i++) {
-            apriltag_detection_t *det;
-            zarray_get(detections, i, &det);
+        for (int i = 0; i < vec_length(detections); i++) {
+            apriltag_detection_t *det = detections->data[i];
 
             float rgb[3];
             int bias = 100;
@@ -1351,9 +1341,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         image_u8_destroy(darker);
 
-        for (int i = 0; i < zarray_size(quads); i++) {
-            struct quad *q;
-            zarray_get_volatile(quads, i, &q);
+        for (int i = 0; i < vec_length(&quads); i++) {
+            atquad_t *q = vec_get_ptr(&quads, i);
 
             float rgb[3];
             int bias = 100;
@@ -1377,33 +1366,29 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
     timeprofile_stamp(td->tp, "debug output");
 
-    for (int i = 0; i < zarray_size(quads); i++) {
-        struct quad *quad;
-        zarray_get_volatile(quads, i, &quad);
+    for (int i = 0; i < vec_length(&quads); i++) {
+        atquad_t *quad = vec_get_ptr(&quads, i);
         matd_destroy(quad->H);
         matd_destroy(quad->Hinv);
     }
 
-    zarray_destroy(quads);
+    vec_deinit(&quads);
 
-    zarray_sort(detections, detection_compare_function);
+    vec_sort(detections, detection_compare_function);
     timeprofile_stamp(td->tp, "cleanup");
 
-    return detections;
+    return 0;
 }
 
 
 // Call this method on each of the tags returned by apriltag_detector_detect
-void apriltag_detections_destroy(zarray_t *detections)
+void apriltag_detections_destroy(vec_apriltag_detection_t *detections)
 {
-    for (int i = 0; i < zarray_size(detections); i++) {
-        apriltag_detection_t *det;
-        zarray_get(detections, i, &det);
-
+    for (int i = 0; i < vec_length(detections); i++) {
+        apriltag_detection_t *det = detections->data[i];
         apriltag_detection_destroy(det);
     }
-
-    zarray_destroy(detections);
+    vec_deinit(detections);
 }
 
 image_u8_t *apriltag_to_image(apriltag_family_t *fam, int idx)

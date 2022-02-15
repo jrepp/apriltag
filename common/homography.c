@@ -29,30 +29,27 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <stdio.h>
 
 #include "common/matd.h"
-#include "common/zarray.h"
+#include "common/vec.h"
 #include "common/homography.h"
 #include "common/math_util.h"
 
 // correspondences is a list of float[4]s, consisting of the points x
 // and y concatenated. We will compute a homography such that y = Hx
-matd_t *homography_compute(zarray_t *correspondences, int flags)
+matd_t *homography_compute(vec_correspondence_t *correspondences, int flags)
 {
     // compute centroids of both sets of points (yields a better
     // conditioned information matrix)
     double x_cx = 0, x_cy = 0;
     double y_cx = 0, y_cy = 0;
-
-    for (int i = 0; i < zarray_size(correspondences); i++) {
-        float *c;
-        zarray_get_volatile(correspondences, i, &c);
-
-        x_cx += c[0];
-        x_cy += c[1];
-        y_cx += c[2];
-        y_cy += c[3];
+    const vec_size_t sz = vec_length(correspondences);
+    for (vec_size_t i = 0; i < sz; i++) {
+        const correspondence_t *c = &correspondences->data[i];
+        x_cx += c->a;
+        x_cy += c->b;
+        y_cx += c->c;
+        y_cy += c->d;
     }
 
-    int sz = zarray_size(correspondences);
     x_cx /= sz;
     x_cy /= sz;
     y_cx /= sz;
@@ -63,15 +60,14 @@ matd_t *homography_compute(zarray_t *correspondences, int flags)
     // doubles.
 
     matd_t *A = matd_create(9,9);
-    for (int i = 0; i < zarray_size(correspondences); i++) {
-        float *c;
-        zarray_get_volatile(correspondences, i, &c);
+    for (vec_size_t i = 0; i < sz; i++) {
+        const correspondence_t *c = &correspondences->data[i];
 
         // (below world is "x", and image is "y")
-        double worldx = c[0] - x_cx;
-        double worldy = c[1] - x_cy;
-        double imagex = c[2] - y_cx;
-        double imagey = c[3] - y_cy;
+        double worldx = c->a - x_cx;
+        double worldy = c->b - x_cy;
+        double imagex = c->c - y_cx;
+        double imagey = c->d - y_cy;
 
         double a03 = -worldx;
         double a04 = -worldy;
