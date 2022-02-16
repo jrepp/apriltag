@@ -191,6 +191,7 @@ int main(int argc, char *argv[])
             }
 
             vec_apriltag_detection_t detections;
+            vec_init(&detections);
             apriltag_detector_detect(&td, im, &detections);
 
             for (int i = 0; i < vec_length(&detections); i++) {

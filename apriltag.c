@@ -387,7 +387,6 @@ void apriltag_detector_destroy(apriltag_detector_t *td)
     apriltag_detector_clear_families(td);
 
     vec_deinit(&td->tag_families);
-    free(td);
 }
 
 struct quad_decode_task

@@ -357,7 +357,7 @@ void getopt_add_bool(getopt_t *gopt, char sopt, const char *lname, int def, cons
 
     zhash_put(gopt->lopts, &goo->lname, &goo, NULL, NULL);
     zhash_put(gopt->sopts, &goo->sname, &goo, NULL, NULL);
-    vec_push(&gopt->options, &goo);
+    vec_push(&gopt->options, goo);
 }
 
 void getopt_add_int(getopt_t *gopt, char sopt, const char *lname, const char *def, const char *help)
@@ -407,7 +407,7 @@ void getopt_add_string(getopt_t *gopt, char sopt, const char *lname, const char 
 
     zhash_put(gopt->lopts, &goo->lname, &goo, NULL, NULL);
     zhash_put(gopt->sopts, &goo->sname, &goo, NULL, NULL);
-    vec_push(&gopt->options, &goo);
+    vec_push(&gopt->options, goo);
 }
 
 const char *getopt_get_string(getopt_t *gopt, const char *lname)

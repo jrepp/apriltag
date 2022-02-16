@@ -109,7 +109,7 @@ struct unionfind_task
 struct quad_task
 {
     vec_multi_cluster_t *clusters;
-    vec_atquad_t quads;
+    vec_atquad_t *quads;
     apriltag_detector_t *td;
     int cidx0, cidx1; // [cidx0, cidx1)
     int w, h;
@@ -1062,7 +1062,7 @@ static void do_quad_task(void *p)
     struct quad_task *task = (struct quad_task*) p;
 
     vec_multi_cluster_t *clusters = task->clusters;
-    vec_atquad_t *quads = &task->quads;
+    vec_atquad_t *quads = task->quads;
     apriltag_detector_t *td = task->td;
     int w = task->w, h = task->h;
 
@@ -1491,7 +1491,7 @@ void do_gradient_clusters(const image_u8_t* threshim, int ts, int y0, int y1, in
     cluster_id_t** mem_pools = malloc(sizeof(cluster_id_t *)*(1 + 2 * nclustermap / mem_chunk_size));
     int mem_pool_idx = 0;
     int mem_pool_loc = 0;
-    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(cluster_hash_t));
+    mem_pools[mem_pool_idx] = calloc(mem_chunk_size, sizeof(cluster_id_t));
 
     for (int y = y0; y < y1; y++) {
         for (int x = 1; x < w-1; x++) {
@@ -1584,7 +1584,8 @@ void do_gradient_clusters(const image_u8_t* threshim, int ts, int y0, int y1, in
             cluster_hash_t* cluster_hash = malloc(sizeof(cluster_hash_t));
             cluster_hash->hash = u64hash_2(entry->id) % nclustermap;
             cluster_hash->id = entry->id;
-            vec_swap_data(entry, cluster_hash);
+            vec_init(cluster_hash);
+            vec_swap_data(cluster_hash, entry);
             vec_push(clusters, cluster_hash);
         }
         vec_size_t end = vec_length(clusters);
@@ -1630,7 +1631,7 @@ void merge_clusters(vec_cluster_hash_ptr_t* c1, vec_cluster_hash_ptr_t* c2, vec_
         cluster_hash_t* h2 = vec_get(c2, i2);
 
         if (h1->hash == h2->hash && h1->id == h2->id) {
-            vec_extend(h2, h1);
+            vec_extend(h1, h2);
             vec_push(out, h1);
             i1++;
             i2++;
@@ -1687,6 +1688,7 @@ void gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w, int
 
     vec_cluster_hash_ptr_t * clusters_list = malloc(sizeof(vec_cluster_hash_ptr_t) * ntasks);
     for (int i = 0; i < ntasks; i++) {
+        vec_init(&clusters_list[i]);
         vec_swap_data(&clusters_list[i], &tasks[i].cluster_hashes);
     }
 
@@ -1707,9 +1709,11 @@ void gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w, int
 
     // Copy all point data from the hash list to the merged final list of points
     vec_reserve(clusters, vec_length(&clusters_list[0]));
+    clusters->length = clusters->capacity;
     for (int i = 0; i < vec_length(&clusters_list[0]); i++) {
         cluster_hash_t* hash = vec_get(&clusters_list[0], i);
         vec_cluster_pt_t *cluster = vec_get_ptr(clusters, i);
+        vec_init(cluster);
         vec_swap_data(cluster, hash);
         free(hash);
     }
@@ -1725,7 +1729,7 @@ void fit_quads(apriltag_detector_t *td, int w, int h, vec_multi_cluster_t * clus
     bool reversed_border = false;
     int min_tag_width = 1000000;
     for (vec_size_t i = 0; i < vec_length(&td->tag_families); i++) {
-        apriltag_family_t* family = td->tag_families.data[i];
+        const apriltag_family_t* family = vec_get(&td->tag_families, i);
         if (family->width_at_border < min_tag_width) {
             min_tag_width = family->width_at_border;
         }
@@ -1748,12 +1752,12 @@ void fit_quads(apriltag_detector_t *td, int w, int h, vec_multi_cluster_t * clus
         tasks[ntasks].cidx1 = imin(sz, i + chunksize);
         tasks[ntasks].h = h;
         tasks[ntasks].w = w;
+        tasks[ntasks].quads = quads;
+        tasks[ntasks].clusters = clusters;
         tasks[ntasks].im = im;
         tasks[ntasks].tag_width = min_tag_width;
         tasks[ntasks].normal_border = normal_border;
         tasks[ntasks].reversed_border = reversed_border;
-        tasks[ntasks].clusters = clusters;
-        vec_init(&tasks[ntasks].quads);
 
         workerpool_add_task(td->wp, do_quad_task, &tasks[ntasks]);
         ntasks++;

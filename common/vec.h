@@ -262,9 +262,9 @@ extern "C" {
   } while (0)
 
 
-// Extend vector `v` with the elements from `v2`
-#define vec_extend(v, v2)\
-  vec_pusharr((v), (v2)->data, (v2)->length)
+// Extend vector `dst` with the elements from `src`
+#define vec_extend(dst, src)\
+  vec_pusharr((dst), (src)->data, (src)->length)
 
 
 // Find `val` in vector, populates `idx` with result

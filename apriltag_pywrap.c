@@ -67,7 +67,7 @@ typedef struct {
     PyObject_HEAD
 
     apriltag_family_t*   tf;
-    apriltag_detector_t* td;
+    apriltag_detector_t td;
     void (*destroy_func)(apriltag_family_t *tf);
 } apriltag_py_t;
 
