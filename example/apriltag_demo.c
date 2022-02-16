@@ -47,11 +47,18 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "tagStandard41h12.h"
 #include "tagStandard52h13.h"
 
+// This demo program is also used to profile and test the internals of the apriltag library, the internals should
+// under normal usage not be used.
 #include "common/getopt.h"
 #include "common/image_u8.h"
 #include "common/image_u8x4.h"
 #include "common/pjpeg.h"
 #include "common/vec.h"
+#include "common/apriltag_detector.h"
+
+typedef struct {
+    vec_define_fields(image_u8_t*)
+} vec_image_t;
 
 // Invoke:
 //
@@ -103,20 +110,87 @@ int main(int argc, char *argv[])
         exit(-1);
     }
 
-    apriltag_detector_t td;
-    apriltag_detector_init(&td);
-    apriltag_detector_add_family_bits(&td, tf, getopt_get_int(getopt, "hamming"));
-    td.quad_decimate = getopt_get_double(getopt, "decimate");
-    td.quad_sigma = getopt_get_double(getopt, "blur");
-    td.nthreads = getopt_get_int(getopt, "threads");
-    td.debug = getopt_get_bool(getopt, "debug");
-    td.refine_edges = getopt_get_bool(getopt, "refine-edges");
+    apriltag_detector_config_t config;
+    apriltag_detector_config_default(&config);
 
+    // Detector parameters
+    config.quad_decimate = getopt_get_double(getopt, "decimate");
+    config.quad_sigma = getopt_get_double(getopt, "blur");
+    config.nthreads = getopt_get_int(getopt, "threads");
+    config.debug = getopt_get_bool(getopt, "debug");
+    config.refine_edges = getopt_get_bool(getopt, "refine-edges");
+
+    apriltag_detector_t *td = apriltag_detector_create(&config);
+    apriltag_detector_add_family_bits(td, tf, getopt_get_int(getopt, "hamming"));
+
+    // Demo program parameters
     int quiet = getopt_get_bool(getopt, "quiet");
-
     int maxiters = getopt_get_int(getopt, "iters");
 
     const int hamm_hist_max = 10;
+
+    // Load the source images
+    vec_image_t images;
+    vec_init(&images);
+    for (int input = 0; input < vec_length(inputs); input++) {
+        char *path = vec_get(inputs, input);
+        if (!quiet)
+            printf("loading %s\n", path);
+        else
+            printf("%20s ", path);
+
+        image_u8_t *im = NULL;
+        if (str_ends_with(path, "pnm") || str_ends_with(path, "PNM") ||
+            str_ends_with(path, "pgm") || str_ends_with(path, "PGM"))
+            im = image_u8_create_from_pnm(path);
+        else if (str_ends_with(path, "jpg") || str_ends_with(path, "JPG")) {
+            int err = 0;
+            pjpeg_t *pjpeg = pjpeg_create_from_file(path, 0, &err);
+            if (pjpeg == NULL) {
+                printf("pjpeg error %d\n", err);
+                continue;
+            }
+
+            if (1) {
+                im = pjpeg_to_u8_baseline(pjpeg);
+            } else {
+                printf("illumination invariant\n");
+
+                image_u8x3_t *imc = pjpeg_to_u8x3_baseline(pjpeg);
+
+                im = image_u8_create(imc->width, imc->height);
+
+                for (int y = 0; y < imc->height; y++) {
+                    for (int x = 0; x < imc->width; x++) {
+                        double r = imc->buf[y * imc->stride + 3 * x + 0] / 255.0;
+                        double g = imc->buf[y * imc->stride + 3 * x + 1] / 255.0;
+                        double b = imc->buf[y * imc->stride + 3 * x + 2] / 255.0;
+
+                        double alpha = 0.42;
+                        double v = 0.5 + log(g) - alpha * log(b) - (1 - alpha) * log(r);
+                        int iv = v * 255;
+                        if (iv < 0)
+                            iv = 0;
+                        if (iv > 255)
+                            iv = 255;
+
+                        im->buf[y * im->stride + x] = iv;
+                    }
+                }
+                image_u8x3_destroy(imc);
+                if (td->config.debug)
+                    image_u8_write_pnm(im, "debug_invariant.pnm");
+            }
+
+            pjpeg_destroy(pjpeg);
+        }
+
+        if (im == NULL) {
+            printf("couldn't load %s\n", path);
+            continue;
+        }
+        vec_push(&images, im);
+    }
 
     for (int iter = 0; iter < maxiters; iter++) {
 
@@ -128,120 +202,60 @@ int main(int argc, char *argv[])
         if (maxiters > 1)
             printf("iter %d / %d\n", iter + 1, maxiters);
 
-        for (int input = 0; input < vec_length(inputs); input++) {
+        vec_size_t i;
+        image_u8_t *im;
+        vec_foreach(&images, im, i) {
 
             int hamm_hist[hamm_hist_max];
             memset(hamm_hist, 0, sizeof(hamm_hist));
 
-            char *path = vec_get(inputs, input);
-            if (!quiet)
-                printf("loading %s\n", path);
-            else
-                printf("%20s ", path);
-
-            image_u8_t *im = NULL;
-            if (str_ends_with(path, "pnm") || str_ends_with(path, "PNM") ||
-                str_ends_with(path, "pgm") || str_ends_with(path, "PGM"))
-                im = image_u8_create_from_pnm(path);
-            else if (str_ends_with(path, "jpg") || str_ends_with(path, "JPG")) {
-                int err = 0;
-                pjpeg_t *pjpeg = pjpeg_create_from_file(path, 0, &err);
-                if (pjpeg == NULL) {
-                    printf("pjpeg error %d\n", err);
-                    continue;
-                }
-
-                if (1) {
-                    im = pjpeg_to_u8_baseline(pjpeg);
-                } else {
-                    printf("illumination invariant\n");
-
-                    image_u8x3_t *imc =  pjpeg_to_u8x3_baseline(pjpeg);
-
-                    im = image_u8_create(imc->width, imc->height);
-
-                    for (int y = 0; y < imc->height; y++) {
-                        for (int x = 0; x < imc->width; x++) {
-                            double r = imc->buf[y*imc->stride + 3*x + 0] / 255.0;
-                            double g = imc->buf[y*imc->stride + 3*x + 1] / 255.0;
-                            double b = imc->buf[y*imc->stride + 3*x + 2] / 255.0;
-
-                            double alpha = 0.42;
-                            double v = 0.5 + log(g) - alpha*log(b) - (1-alpha)*log(r);
-                            int iv = v * 255;
-                            if (iv < 0)
-                                iv = 0;
-                            if (iv > 255)
-                                iv = 255;
-
-                            im->buf[y*im->stride + x] = iv;
-                        }
-                    }
-                    image_u8x3_destroy(imc);
-                    if (td.debug)
-                        image_u8_write_pnm(im, "debug_invariant.pnm");
-                }
-
-                pjpeg_destroy(pjpeg);
-            }
-
-            if (im == NULL) {
-                printf("couldn't load %s\n", path);
-                continue;
-            }
-
-            vec_apriltag_detection_t detections;
-            vec_init(&detections);
-            apriltag_detector_detect(&td, im, &detections);
-
-            for (int i = 0; i < vec_length(&detections); i++) {
-                apriltag_detection_t *det = vec_get(&detections, i);
-                if (!quiet)
+            apriltag_detection_t *det = apriltag_detector_detect(td, im);
+            for (int di = 0; det != NULL; det = apriltag_detector_next_detection(td), ++di) {
+                if (!quiet) {
                     printf("detection %3d: id (%2dx%2d)-%-4d, hamming %d, margin %8.3f\n",
-                           i, det->family->nbits, det->family->h, det->id, det->hamming, det->decision_margin);
-
+                           di, det->family->nbits, det->family->h, det->id, det->hamming, det->decision_margin);
+                }
                 hamm_hist[det->hamming]++;
                 total_hamm_hist[det->hamming]++;
             }
-            vec_deinit(&detections);
 
             if (!quiet) {
-                timeprofile_display(td.tp);
+                timeprofile_display(td->tp);
             }
 
-            total_quads += td.nquads;
+            total_quads += td->nquads;
+            double t = timeprofile_total_utime(td->tp) / 1.0E3;
+            total_time += t;
 
-            if (!quiet)
+            if (!quiet) {
                 printf("hamm ");
 
-            for (int i = 0; i < hamm_hist_max; i++)
-                printf("%5d ", hamm_hist[i]);
+                for (int hi = 0; hi < hamm_hist_max; hi++)
+                    printf("%5d ", hamm_hist[hi]);
 
-            double t =  timeprofile_total_utime(td.tp) / 1.0E3;
-            total_time += t;
-            printf("%12.3f ", t);
-            printf("%5d", td.nquads);
+                printf("time %12.3f ", t);
+                printf("quads %5d", td->nquads);
 
-            printf("\n");
-
-            image_u8_destroy(im);
+                printf("\n");
+            }
         }
-
 
         printf("Summary\n");
 
         printf("hamm ");
 
-        for (int i = 0; i < hamm_hist_max; i++)
-            printf("%5d ", total_hamm_hist[i]);
-        printf("%12.3f ", total_time);
-        printf("%5d", total_quads);
+        for (int hi = 0; hi < hamm_hist_max; hi++)
+            printf("%5d ", total_hamm_hist[hi]);
+        printf("time %12.3f ", total_time);
+        printf("quads %5d", total_quads);
         printf("\n");
-
     }
 
+    vec_each(&images, image_u8_destroy);
+    vec_deinit(&images);
+
     // don't deallocate contents of inputs; those are the argv
-    apriltag_detector_destroy(&td);
+    apriltag_detector_destroy(td);
 
     if (!strcmp(famname, "tag36h11")) {
         tag36h11_destroy(tf);

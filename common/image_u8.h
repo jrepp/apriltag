@@ -56,7 +56,7 @@ image_u8_t *image_u8_create_alignment(unsigned int width, unsigned int height, u
 image_u8_t *image_u8_create_from_f32(image_f32_t *fim);
 
 image_u8_t *image_u8_create_from_pnm(const char *path);
-    image_u8_t *image_u8_create_from_pnm_alignment(const char *path, int alignment);
+image_u8_t *image_u8_create_from_pnm_alignment(const char *path, int alignment);
 
 image_u8_t *image_u8_copy(const image_u8_t *in);
 void image_u8_draw_line(image_u8_t *im, float x0, float y0, float x1, float y1, int v, int width);
@@ -71,7 +71,7 @@ void image_u8_convolve_2D(image_u8_t *im, const uint8_t *k, int ksz);
 void image_u8_gaussian_blur(image_u8_t *im, double sigma, int k);
 
 // 1.5, 2, 3, 4, ... supported
-image_u8_t *image_u8_decimate(image_u8_t *im, float factor);
+image_u8_t *image_u8_decimate(const image_u8_t *im, float factor);
 
 void image_u8_destroy(image_u8_t *im);
 

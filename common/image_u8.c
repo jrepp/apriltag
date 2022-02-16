@@ -433,7 +433,7 @@ image_u8_t *image_u8_rotate(const image_u8_t *in, double rad, uint8_t pad)
     return out;
 }
 
-image_u8_t *image_u8_decimate(image_u8_t *im, float ffactor)
+image_u8_t *image_u8_decimate(const image_u8_t *im, float ffactor)
 {
     int width = im->width, height = im->height;
 
@@ -497,6 +497,7 @@ image_u8_t *image_u8_decimate(image_u8_t *im, float ffactor)
         }
         sy++;
     }
+
     return decim;
 }
 

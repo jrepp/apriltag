@@ -49,10 +49,15 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "common/math_util.h"
 #include "common/g2d.h"
 #include "common/floats.h"
+#include "common/apriltag_detector.h"
 
 #include "apriltag_math.h"
 
 #include "common/postscript_utils.h"
+
+// Config validitity check "aprl"
+#define APRILTAG_CONFIG_VALID 0x6170726c
+
 
 #ifndef M_PI
 # define M_PI 3.141592653589793238462643383279502884196
@@ -72,7 +77,7 @@ static inline long int random(void)
 
 #define APRILTAG_U64_ONE ((uint64_t) 1)
 
-extern void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t *quads);
+extern void apriltag_quad_thresh(apriltag_detector_t *td, const image_u8_t *im, vec_atquad_t *quads);
 
 // Regresses a model of the form:
 // intensity(x,y) = C0*x + C1*y + CC2
@@ -345,38 +350,53 @@ void apriltag_detector_clear_families(apriltag_detector_t *td)
     vec_clear(&td->tag_families);
 }
 
-int apriltag_detector_init(apriltag_detector_t *td)
+static void apriltag_detection_destroy(apriltag_detection_t *det)
 {
-    memset(td, 0, sizeof(apriltag_detector_t ));
+    matd_destroy(det->H);
+}
 
-    td->nthreads = 1;
-    td->quad_decimate = 2.0;
-    td->quad_sigma = 0.0;
+void apriltag_detector_config_default(apriltag_detector_config_t *config)
+{
+    memset(config, 0, sizeof(*config));
+    config->nthreads = 1;
+    config->quad_decimate = 2.0;
+    config->quad_sigma = 0.0;
 
-    td->qtp.max_nmaxima = 10;
-    td->qtp.min_cluster_pixels = 5;
+    config->qtp.max_nmaxima = 10;
+    config->qtp.min_cluster_pixels = 5;
 
-    td->qtp.max_line_fit_mse = 10.0;
-    td->qtp.cos_critical_rad = cos(10 * M_PI / 180);
-    td->qtp.deglitch = 0;
-    td->qtp.min_white_black_diff = 5;
+    config->qtp.max_line_fit_mse = 10.0;
+    config->qtp.cos_critical_rad = cos(10 * M_PI / 180);
+    config->qtp.deglitch = 0;
+    config->qtp.min_white_black_diff = 5;
+
+    config->refine_edges = 1;
+    config->decode_sharpening = 0.25;
+    config->debug = 0;
+
+    config->valid = APRILTAG_CONFIG_VALID;
+}
+
+apriltag_detector_t *apriltag_detector_create(const apriltag_detector_config_t *config)
+{
+    if (config->valid != APRILTAG_CONFIG_VALID) {
+        printf("invalid config, use apriltag_detector_config_default() before overriding parameters");
+        return NULL;
+    }
+
+    apriltag_detector_t *td = (apriltag_detector_t*) calloc(1, sizeof(apriltag_detector_t));
+    memcpy(&td->config, config, sizeof(td->config));
 
     vec_init(&td->tag_families);
+    vec_init(&td->detections);
+    vec_init(&td->quads);
 
     pthread_mutex_init(&td->mutex, NULL);
 
     td->tp = timeprofile_create();
+    td->wp = workerpool_create(td->config.nthreads);
 
-    td->refine_edges = 1;
-    td->decode_sharpening = 0.25;
-
-
-    td->debug = 0;
-
-    // NB: defer initialization of td->wp so that the user can
-    // override td->nthreads.
-
-    return 0;
+    return td;
 }
 
 void apriltag_detector_destroy(apriltag_detector_t *td)
@@ -386,16 +406,24 @@ void apriltag_detector_destroy(apriltag_detector_t *td)
 
     apriltag_detector_clear_families(td);
 
+    if (td->im_quads) {
+        image_u8_destroy(td->im_quads);
+    }
+
+    vec_each_ptr(&td->detections, apriltag_detection_destroy);
     vec_deinit(&td->tag_families);
+    vec_deinit(&td->detections);
+    vec_deinit(&td->quads);
+    free(td);
 }
 
 struct quad_decode_task
 {
     int i0, i1;
-    vec_atquad_t quads;
+    vec_atquad_t *quads;
     apriltag_detector_t *td;
 
-    image_u8_t *im;
+    const image_u8_t *im;
     vec_apriltag_detection_t *detections;
 
     image_u8_t *im_samples;
@@ -541,7 +569,7 @@ static void sharpen(apriltag_detector_t* td, double* values, int size) {
 
     for (int y = 0; y < size; y++) {
         for (int x = 0; x < size; x++) {
-            values[y*size + x] = values[y*size + x] + td->decode_sharpening*sharpened[y*size + x];
+            values[y*size + x] = values[y*size + x] + td->config.decode_sharpening * sharpened[y*size + x];
         }
     }
 
@@ -723,7 +751,7 @@ static float quad_decode(apriltag_detector_t* td, const apriltag_family_t *famil
     return fmin(white_score / white_score_count, black_score / black_score_count);
 }
 
-static void refine_edges(apriltag_detector_t *td, image_u8_t *im_orig, struct quad *quad)
+static void refine_edges(apriltag_detector_t *td, const image_u8_t *im_orig, struct quad *quad)
 {
     double lines[4][4]; // for each line, [Ex Ey nx ny]
 
@@ -772,7 +800,7 @@ static void refine_edges(apriltag_detector_t *td, image_u8_t *im_orig, struct qu
             // search on another pixel in the first place. Likewise,
             // for very small tags, we don't want the range to be too
             // big.
-            double range = td->quad_decimate + 1;
+            double range = td->config.quad_decimate + 1;
 
             // XXX tunable step size.
             for (double n = -range; n <= range; n +=  0.25) {
@@ -875,15 +903,15 @@ static void quad_decode_task(void *_u)
 {
     struct quad_decode_task *task = (struct quad_decode_task*) _u;
     apriltag_detector_t *td = task->td;
-    image_u8_t *im = task->im;
+    const image_u8_t *im = task->im;
 
     for (int quadidx = task->i0; quadidx < task->i1; quadidx++) {
-        atquad_t *quad_original = &task->quads.data[quadidx];
+        atquad_t *quad_original = vec_get_ptr(task->quads, quadidx);
 
         // refine edges is not dependent upon the tag family, thus
         // apply this optimization BEFORE the other work.
         //if (td->quad_decimate > 1 && td->refine_edges) {
-        if (td->refine_edges) {
+        if (td->config.refine_edges) {
             refine_edges(td, im, quad_original);
         }
 
@@ -907,12 +935,12 @@ static void quad_decode_task(void *_u)
             float decision_margin = quad_decode(td, family, im, quad, &entry, task->im_samples);
 
             if (decision_margin >= 0 && entry.hamming < 255) {
-                apriltag_detection_t *det = calloc(1, sizeof(apriltag_detection_t));
+                apriltag_detection_t det = { 0, };
 
-                det->family = family;
-                det->id = entry.id;
-                det->hamming = entry.hamming;
-                det->decision_margin = decision_margin;
+                det.family = family;
+                det.id = entry.id;
+                det.hamming = entry.hamming;
+                det.decision_margin = decision_margin;
 
                 double theta = entry.rotation * M_PI / 2.0;
                 double c = cos(theta), s = sin(theta);
@@ -925,11 +953,11 @@ static void quad_decode_task(void *_u)
                 MATD_EL(R, 1, 1) = c;
                 MATD_EL(R, 2, 2) = 1;
 
-                det->H = matd_op("M*M", quad->H, R);
+                det.H = matd_op("M*M", quad->H, R);
 
                 matd_destroy(R);
 
-                homography_project(det->H, 0, 0, &det->c[0], &det->c[1]);
+                homography_project(det.H, 0, 0, &det.c[0], &det.c[1]);
 
                 // [-1, -1], [1, -1], [1, 1], [-1, 1], Desired points
                 // [-1, 1], [1, 1], [1, -1], [-1, -1], FLIP Y
@@ -941,10 +969,10 @@ static void quad_decode_task(void *_u)
 
                     double p[2];
 
-                    homography_project(det->H, tcx, tcy, &p[0], &p[1]);
+                    homography_project(det.H, tcx, tcy, &p[0], &p[1]);
 
-                    det->p[i][0] = p[0];
-                    det->p[i][1] = p[1];
+                    det.p[i][0] = p[0];
+                    det.p[i][1] = p[1];
                 }
 
                 pthread_mutex_lock(&td->mutex);
@@ -955,15 +983,6 @@ static void quad_decode_task(void *_u)
             quad_destroy(quad);
         }
     }
-}
-
-void apriltag_detection_destroy(apriltag_detection_t *det)
-{
-    if (det == NULL)
-        return;
-
-    matd_destroy(det->H);
-    free(det);
 }
 
 static int prefer_smaller(int pref, double q0, double q1)
@@ -980,17 +999,17 @@ static int prefer_smaller(int pref, double q0, double q1)
     return 0;
 }
 
-int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_apriltag_detection_t *detections)
+apriltag_detection_t * apriltag_detector_detect(apriltag_detector_t *td, const image_u8_t *im_orig)
 {
     if (vec_empty(&td->tag_families)) {
         printf("apriltag.c: No tag families enabled.");
-        return -1;
+        return NULL;
     }
 
-    if (td->wp == NULL || td->nthreads != workerpool_get_nthreads(td->wp)) {
-        workerpool_destroy(td->wp);
-        td->wp = workerpool_create(td->nthreads);
-    }
+    // Clear the detection memory
+    vec_each_ptr(&td->detections, apriltag_detection_destroy);
+    vec_clear(&td->detections);
+    vec_clear(&td->quads);
 
     timeprofile_clear(td->tp);
     timeprofile_stamp(td->tp, "init");
@@ -998,14 +1017,25 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
     ///////////////////////////////////////////////////////////
     // Step 1. Detect quads according to requested image decimation
     // and blurring parameters.
-    image_u8_t *quad_im = im_orig;
-    if (td->quad_decimate > 1) {
-        quad_im = image_u8_decimate(im_orig, td->quad_decimate);
 
+    if (td->config.quad_decimate > 1) {
+        if (td->im_quads)
+            image_u8_destroy(td->im_quads);
+        td->im_quads = image_u8_decimate(im_orig, td->config.quad_decimate);
         timeprofile_stamp(td->tp, "decimate");
+    } else {
+        // Create the initial pre-processed quad image data
+        if (td->im_quads && ((im_orig->height != td->im_quads->height) || (im_orig->width != td->im_quads->width))) {
+            image_u8_destroy(td->im_quads);
+            td->im_quads = image_u8_copy(im_orig);
+        } else if (td->im_quads == NULL) {
+            td->im_quads = image_u8_copy(im_orig);
+        } else {
+            memcpy(td->im_quads->buf, im_orig->buf, im_orig->height * im_orig->stride * sizeof(uint8_t));
+        }
     }
 
-    if (td->quad_sigma != 0) {
+    if (td->config.quad_sigma != 0) {
         // compute a reasonable kernel width by figuring that the
         // kernel should go out 2 std devs.
         //
@@ -1015,7 +1045,7 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
         // 1.499              5
         // 1.999              7
 
-        float sigma = fabsf((float) td->quad_sigma);
+        float sigma = fabsf((float) td->config.quad_sigma);
 
         int ksz = 4 * sigma; // 2 std devs in each direction
         if ((ksz & 1) == 0)
@@ -1023,18 +1053,17 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         if (ksz > 1) {
 
-            if (td->quad_sigma > 0) {
+            if (td->config.quad_sigma > 0) {
                 // Apply a blur
-                image_u8_gaussian_blur(quad_im, sigma, ksz);
+                image_u8_gaussian_blur(td->im_quads, sigma, ksz);
             } else {
                 // SHARPEN the image by subtracting the low frequency components.
-                image_u8_t *orig = image_u8_copy(quad_im);
-                image_u8_gaussian_blur(quad_im, sigma, ksz);
+                image_u8_gaussian_blur(td->im_quads, sigma, ksz);
 
-                for (int y = 0; y < orig->height; y++) {
-                    for (int x = 0; x < orig->width; x++) {
-                        int vorig = orig->buf[y*orig->stride + x];
-                        int vblur = quad_im->buf[y*quad_im->stride + x];
+                for (int y = 0; y < im_orig->height; y++) {
+                    for (int x = 0; x < im_orig->width; x++) {
+                        int vorig = im_orig->buf[y * im_orig->stride + x];
+                        int vblur = td->im_quads->buf[y * td->im_quads->stride + x];
 
                         int v = 2*vorig - vblur;
                         if (v < 0)
@@ -1042,88 +1071,82 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
                         if (v > 255)
                             v = 255;
 
-                        quad_im->buf[y*quad_im->stride + x] = (uint8_t) v;
+                        td->im_quads->buf[y * td->im_quads->stride + x] = (uint8_t) v;
                     }
                 }
-                image_u8_destroy(orig);
             }
         }
     }
 
     timeprofile_stamp(td->tp, "blur/sharp");
 
-    if (td->debug)
-        image_u8_write_pnm(quad_im, "debug_preprocess.pnm");
+    if (td->config.debug)
+        image_u8_write_pnm(td->im_quads, "debug_preprocess.pnm");
 
-    vec_atquad_t quads;
-    vec_init(&quads);
-    apriltag_quad_thresh(td, quad_im, &quads);
+    apriltag_quad_thresh(td, td->im_quads, &td->quads);
 
     // adjust centers of pixels so that they correspond to the
     // original full-resolution image.
-    if (td->quad_decimate > 1) {
-        for (int i = 0; i < vec_length(&quads); i++) {
-            atquad_t *q = &quads.data[i];
+    if (td->config.quad_decimate > 1) {
+        for (int i = 0; i < vec_length(&td->quads); i++) {
+            atquad_t *q = vec_get_ptr(&td->quads, i);
 
             for (int j = 0; j < 4; j++) {
-                if (td->quad_decimate == 1.5) {
-                    q->p[j][0] *= td->quad_decimate;
-                    q->p[j][1] *= td->quad_decimate;
+                if (td->config.quad_decimate == 1.5) {
+                    q->p[j][0] *= td->config.quad_decimate;
+                    q->p[j][1] *= td->config.quad_decimate;
                 } else {
-                    q->p[j][0] = (q->p[j][0] - 0.5) * td->quad_decimate + 0.5;
-                    q->p[j][1] = (q->p[j][1] - 0.5) * td->quad_decimate + 0.5;
+                    q->p[j][0] = (q->p[j][0] - 0.5) * td->config.quad_decimate + 0.5;
+                    q->p[j][1] = (q->p[j][1] - 0.5) * td->config.quad_decimate + 0.5;
                 }
             }
         }
     }
 
-    if (quad_im != im_orig)
-        image_u8_destroy(quad_im);
-
-    td->nquads = vec_length(&quads);
+    td->nquads = vec_length(&td->quads);
 
     timeprofile_stamp(td->tp, "quads");
 
-    if (td->debug) {
-        image_u8_t *im_quads = image_u8_copy(im_orig);
-        image_u8_darken(im_quads);
-        image_u8_darken(im_quads);
+    if (td->config.debug) {
+        image_u8_t *im_debug = image_u8_copy(im_orig);
+        image_u8_darken(im_debug);
+        image_u8_darken(im_debug);
 
         srandom(0);
 
-        for (int i = 0; i < vec_length(&quads); i++) {
-            atquad_t *quad = &quads.data[i];
+        for (int i = 0; i < vec_length(&td->quads); i++) {
+            atquad_t *quad = vec_get_ptr(&td->quads, i);
 
             const int bias = 100;
             int color = bias + (random() % (255-bias));
 
-            image_u8_draw_line(im_quads, quad->p[0][0], quad->p[0][1], quad->p[1][0], quad->p[1][1], color, 1);
-            image_u8_draw_line(im_quads, quad->p[1][0], quad->p[1][1], quad->p[2][0], quad->p[2][1], color, 1);
-            image_u8_draw_line(im_quads, quad->p[2][0], quad->p[2][1], quad->p[3][0], quad->p[3][1], color, 1);
-            image_u8_draw_line(im_quads, quad->p[3][0], quad->p[3][1], quad->p[0][0], quad->p[0][1], color, 1);
+            image_u8_draw_line(im_debug, quad->p[0][0], quad->p[0][1], quad->p[1][0], quad->p[1][1], color, 1);
+            image_u8_draw_line(im_debug, quad->p[1][0], quad->p[1][1], quad->p[2][0], quad->p[2][1], color, 1);
+            image_u8_draw_line(im_debug, quad->p[2][0], quad->p[2][1], quad->p[3][0], quad->p[3][1], color, 1);
+            image_u8_draw_line(im_debug, quad->p[3][0], quad->p[3][1], quad->p[0][0], quad->p[0][1], color, 1);
         }
 
-        image_u8_write_pnm(im_quads, "debug_quads_raw.pnm");
-        image_u8_destroy(im_quads);
+        image_u8_write_pnm(im_debug, "debug_quads_raw.pnm");
+        image_u8_destroy(im_debug);
     }
 
     ////////////////////////////////////////////////////////////////
     // Step 2. Decode tags from each quad.
     if (1) {
-        image_u8_t *im_samples = td->debug ? image_u8_copy(im_orig) : NULL;
+        image_u8_t *im_samples = td->config.debug ? image_u8_copy(im_orig) : NULL;
 
-        int chunksize = 1 + vec_length(&quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+        int chunksize = 1 + vec_length(&td->quads) / (APRILTAG_TASKS_PER_THREAD_TARGET * td->config.nthreads);
 
-        struct quad_decode_task *tasks = malloc(sizeof(struct quad_decode_task)*(vec_length(&quads) / chunksize + 1));
+        struct quad_decode_task *tasks = malloc(sizeof(struct quad_decode_task)*(vec_length(&td->quads) / chunksize + 1));
 
         int ntasks = 0;
-        for (int i = 0; i < vec_length(&quads); i+= chunksize) {
+        for (int i = 0; i < vec_length(&td->quads); i+= chunksize) {
             tasks[ntasks].i0 = i;
-            tasks[ntasks].i1 = imin(vec_length(&quads), i + chunksize);
-            tasks[ntasks].quads = quads;
+            tasks[ntasks].i1 = imin(vec_length(&td->quads), i + chunksize);
+            tasks[ntasks].quads = &td->quads;
             tasks[ntasks].td = td;
             tasks[ntasks].im = im_orig;
-            tasks[ntasks].detections = detections;
+            tasks[ntasks].detections = &td->detections;
 
             tasks[ntasks].im_samples = im_samples;
 
@@ -1141,15 +1164,15 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
         }
     }
 
-    if (td->debug) {
+    if (td->config.debug) {
         image_u8_t *im_quads = image_u8_copy(im_orig);
         image_u8_darken(im_quads);
         image_u8_darken(im_quads);
 
         srandom(0);
 
-        for (int i = 0; i < vec_length(&quads); i++) {
-            atquad_t *quad = vec_get_ptr(&quads, i);
+        for (int i = 0; i < vec_length(&td->quads); i++) {
+            atquad_t *quad = vec_get_ptr(&td->quads, i);
 
             const int bias = 100;
             int color = bias + (random() % (255-bias));
@@ -1175,15 +1198,15 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
         g2d_polygon_create_zeros(4, &poly0);
         g2d_polygon_create_zeros(4, &poly1);
 
-        for (int i0 = 0; i0 < vec_length(detections); i0++) {
-            apriltag_detection_t *det0 = detections->data[i0];
+        for (int i0 = 0; i0 < vec_length(&td->detections); i0++) {
+            apriltag_detection_t *det0 = vec_get_ptr(&td->detections, i0);
 
             for (int k = 0; k < 4; k++) {
                 poly0.data[k].x = det0->p[k][0];
                 poly0.data[k].y = det0->p[k][1];
             }
-            for (int i1 = i0+1; i1 < vec_length(detections); i1++) {
-                apriltag_detection_t *det1 = detections->data[i1];
+            for (int i1 = i0+1; i1 < vec_length(&td->detections); i1++) {
+                apriltag_detection_t *det1 = vec_get_ptr(&td->detections, i1);
 
                 if (det0->id != det1->id || det0->family != det1->family)
                     continue;
@@ -1216,13 +1239,13 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
                     if (pref < 0) {
                         // keep det0, destroy det1
                         apriltag_detection_destroy(det1);
-                        vec_splice(detections, i1, 1);
+                        vec_splice(&td->detections, i1, 1);
                         i1--; // retry the same index
                         goto retry1;
                     } else {
                         // keep det1, destroy det0
                         apriltag_detection_destroy(det0);
-                        vec_splice(detections, i0, 1);
+                        vec_splice(&td->detections, i0, 1);
                         i0--; // retry the same index.
                         goto retry0;
                     }
@@ -1242,7 +1265,7 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
     ////////////////////////////////////////////////////////////////
     // Produce final debug output
-    if (td->debug) {
+    if (td->config.debug) {
 
         image_u8_t *darker = image_u8_copy(im_orig);
         image_u8_darken(darker);
@@ -1259,8 +1282,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         image_u8_destroy(darker);
 
-        for (int i = 0; i < vec_length(detections); i++) {
-            apriltag_detection_t *det = detections->data[i];
+        for (int i = 0; i < vec_length(&td->detections); i++) {
+            apriltag_detection_t *det = vec_get_ptr(&td->detections, i);
 
             float rgb[3];
             int bias = 100;
@@ -1282,7 +1305,7 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
         fclose(f);
     }
 
-    if (td->debug) {
+    if (td->config.debug) {
         image_u8_t *darker = image_u8_copy(im_orig);
         image_u8_darken(darker);
         image_u8_darken(darker);
@@ -1298,8 +1321,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         image_u8_destroy(darker);
 
-        for (int i = 0; i < vec_length(detections); i++) {
-            apriltag_detection_t *det = detections->data[i];
+        for (int i = 0; i < vec_length(&td->detections); i++) {
+            apriltag_detection_t *det = vec_get_ptr(&td->detections, i);
 
             float rgb[3];
             int bias = 100;
@@ -1322,7 +1345,7 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
     }
 
     // deallocate
-    if (td->debug) {
+    if (td->config.debug) {
         FILE *f = fopen("debug_quads.ps", "w");
         fprintf(f, "%%!PS\n\n");
 
@@ -1340,8 +1363,8 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
         image_u8_destroy(darker);
 
-        for (int i = 0; i < vec_length(&quads); i++) {
-            atquad_t *q = vec_get_ptr(&quads, i);
+        for (int i = 0; i < vec_length(&td->quads); i++) {
+            atquad_t *q = vec_get_ptr(&td->quads, i);
 
             float rgb[3];
             int bias = 100;
@@ -1365,29 +1388,34 @@ int apriltag_detector_detect(apriltag_detector_t *td, image_u8_t *im_orig, vec_a
 
     timeprofile_stamp(td->tp, "debug output");
 
-    for (int i = 0; i < vec_length(&quads); i++) {
-        atquad_t *quad = vec_get_ptr(&quads, i);
+    for (int i = 0; i < vec_length(&td->quads); i++) {
+        atquad_t *quad = vec_get_ptr(&td->quads, i);
         matd_destroy(quad->H);
         matd_destroy(quad->Hinv);
     }
 
-    vec_deinit(&quads);
+    vec_deinit(&td->quads);
 
-    vec_sort(detections, detection_compare_function);
+    vec_sort(&td->detections, detection_compare_function);
     timeprofile_stamp(td->tp, "cleanup");
 
-    return 0;
+    td->detection_index = 0;
+    apriltag_detection_t *det = NULL;
+    if (!vec_empty(&td->detections)) {
+        det = vec_get_ptr(&td->detections, td->detection_index);
+        td->detection_index++;
+    }
+    return det;
 }
 
-
-// Call this method on each of the tags returned by apriltag_detector_detect
-void apriltag_detections_destroy(vec_apriltag_detection_t *detections)
+apriltag_detection_t *apriltag_detector_next_detection(apriltag_detector_t *td)
 {
-    for (int i = 0; i < vec_length(detections); i++) {
-        apriltag_detection_t *det = detections->data[i];
-        apriltag_detection_destroy(det);
+    apriltag_detection_t *det = NULL;
+    if (td->detection_index < vec_length(&td->detections)) {
+        det = vec_get_ptr(&td->detections, td->detection_index);
+        td->detection_index++;
     }
-    vec_deinit(detections);
+    return det;
 }
 
 image_u8_t *apriltag_to_image(apriltag_family_t *fam, int idx)

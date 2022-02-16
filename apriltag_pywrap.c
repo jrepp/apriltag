@@ -131,7 +131,16 @@ apriltag_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 
     if(0) ; SUPPORTED_TAG_FAMILIES(TAG_CREATE_FAMILY);
 
-    self->td = apriltag_detector_create();
+    apriltag_detector_config_t config;
+    apriltag_detector_config_default(&config);
+
+    config.quad_decimate = decimate;
+    config.quad_sigma = blur;
+    config.nthreads = Nthreads;
+    config.refine_edges = refine_edges;
+    config.debug = debug;
+
+    self->td = apriltag_detector_create(&config);
     if(self->td == NULL)
     {
         PyErr_SetString(PyExc_RuntimeError, "apriltag_detector_create() failed!");
@@ -139,11 +148,6 @@ apriltag_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     }
 
     apriltag_detector_add_family_bits(self->td, self->tf, maxhamming);
-    self->td->quad_decimate       = decimate;
-    self->td->quad_sigma          = blur;
-    self->td->nthreads            = Nthreads;
-    self->td->refine_edges        = refine_edges;
-    self->td->debug               = debug;
 
     success = true;
 

@@ -97,18 +97,17 @@ int main(int argc, char *argv[])
         exit(-1);
     }
 
+    apriltag_detector_config_t config;
+    apriltag_detector_config_default(&config);
 
-    apriltag_detector_t td;
-    apriltag_detector_init(&td);
-    apriltag_detector_add_family(&td, tf);
-    td.quad_decimate = getopt_get_double(getopt, "decimate");
-    td.quad_sigma = getopt_get_double(getopt, "blur");
-    td.nthreads = getopt_get_int(getopt, "threads");
-    td.debug = getopt_get_bool(getopt, "debug");
-    td.refine_edges = getopt_get_bool(getopt, "refine-edges");
+    config.quad_decimate = getopt_get_double(getopt, "decimate");
+    config.quad_sigma = getopt_get_double(getopt, "blur");
+    config.nthreads = getopt_get_int(getopt, "threads");
+    config.debug = getopt_get_bool(getopt, "debug");
+    config.refine_edges = getopt_get_bool(getopt, "refine-edges");
 
-    vec_apriltag_detection_t detections;
-    vec_init(&detections);
+    apriltag_detector_t *td = apriltag_detector_create(&config);
+    apriltag_detector_add_family(td, tf);
 
     Mat frame, gray;
     while (true) {
@@ -122,11 +121,10 @@ int main(int argc, char *argv[])
             .buf = gray.data
         };
 
-        apriltag_detector_detect(&td, &im, &detections);
+        apriltag_detection_t *det = apriltag_detector_detect(td, &im);
 
         // Draw detection outlines
-        for (int i = 0; i < vec_length(&detections); i++) {
-            apriltag_detection_t *det = vec_get(&detections, i);
+        for (int i = 0; det != NULL; i++, det = apriltag_detector_next_detection(td)) {
             line(frame, Point(det->p[0][0], det->p[0][1]),
                      Point(det->p[1][0], det->p[1][1]),
                      Scalar(0, 0xff, 0), 2);
@@ -158,8 +156,7 @@ int main(int argc, char *argv[])
             break;
     }
 
-    vec_deinit(&detections);
-    apriltag_detector_destroy(&td);
+    apriltag_detector_destroy(td);
 
     if (!strcmp(famname, "tag36h11")) {
         tag36h11_destroy(tf);

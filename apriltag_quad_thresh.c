@@ -43,6 +43,7 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include "common/zmaxheap.h"
 #include "common/postscript_utils.h"
 #include "common/math_util.h"
+#include "common/apriltag_detector.h"
 
 #ifdef _WIN32
 static inline long int random(void)
@@ -398,7 +399,7 @@ int quad_segment_maxima(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line
     }
 
     // select only the best maxima if we have too many
-    int max_nmaxima = td->qtp.max_nmaxima;
+    int max_nmaxima = td->config.qtp.max_nmaxima;
 
     if (nmaxima > max_nmaxima) {
         double *maxima_errs_copy = malloc(sizeof(double)*nmaxima);
@@ -427,7 +428,7 @@ int quad_segment_maxima(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line
     double params01[4], params12[4], params23[4], params30[4];
 
     // disallow quads where the angle is less than a critical value.
-    double max_dot = td->qtp.cos_critical_rad; //25*M_PI/180);
+    double max_dot = td->config.qtp.cos_critical_rad; //25*M_PI/180);
 
     for (int m0 = 0; m0 < nmaxima - 3; m0++) {
         int i0 = maxima[m0];
@@ -437,14 +438,14 @@ int quad_segment_maxima(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line
 
             fit_line(lfps, sz, i0, i1, params01, &err01, &mse01);
 
-            if (mse01 > td->qtp.max_line_fit_mse)
+            if (mse01 > td->config.qtp.max_line_fit_mse)
                 continue;
 
             for (int m2 = m1+1; m2 < nmaxima - 1; m2++) {
                 int i2 = maxima[m2];
 
                 fit_line(lfps, sz, i1, i2, params12, &err12, &mse12);
-                if (mse12 > td->qtp.max_line_fit_mse)
+                if (mse12 > td->config.qtp.max_line_fit_mse)
                     continue;
 
                 double dot = params01[2]*params12[2] + params01[3]*params12[3];
@@ -455,11 +456,11 @@ int quad_segment_maxima(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line
                     int i3 = maxima[m3];
 
                     fit_line(lfps, sz, i2, i3, params23, &err23, &mse23);
-                    if (mse23 > td->qtp.max_line_fit_mse)
+                    if (mse23 > td->config.qtp.max_line_fit_mse)
                         continue;
 
                     fit_line(lfps, sz, i3, i0, params30, &err30, &mse30);
-                    if (mse30 > td->qtp.max_line_fit_mse)
+                    if (mse30 > td->config.qtp.max_line_fit_mse)
                         continue;
 
                     double err = err01 + err12 + err23 + err30;
@@ -483,7 +484,7 @@ int quad_segment_maxima(apriltag_detector_t *td, vec_cluster_pt_t *cluster, line
     for (int i = 0; i < 4; i++)
         indices[i] = best_indices[i];
 
-    if (best_error / sz < td->qtp.max_line_fit_mse)
+    if (best_error / sz < td->config.qtp.max_line_fit_mse)
         return 1;
     return 0;
 }
@@ -885,7 +886,7 @@ int fit_quad(
         double err;
         fit_line(lfps, sz, i0, i1, lines[i], NULL, &err);
 
-        if (err > td->qtp.max_line_fit_mse) {
+        if (err > td->config.qtp.max_line_fit_mse) {
             res = 0;
             goto finish;
         }
@@ -976,7 +977,7 @@ int fit_quad(
             double dy2 = quad->p[i2][1] - quad->p[i1][1];
             double cos_dtheta = (dx1*dx2 + dy1*dy2)/sqrt((dx1*dx1 + dy1*dy1)*(dx2*dx2 + dy2*dy2));
 
-            if ((cos_dtheta > td->qtp.cos_critical_rad || cos_dtheta < -td->qtp.cos_critical_rad) || dx1*dy2 < dy1*dx2) {
+            if ((cos_dtheta > td->config.qtp.cos_critical_rad || cos_dtheta < -td->config.qtp.cos_critical_rad) || dx1*dy2 < dy1*dx2) {
                 res = 0;
                 goto finish;
             }
@@ -1069,7 +1070,7 @@ static void do_quad_task(void *p)
     for (int cidx = task->cidx0; cidx < task->cidx1; cidx++) {
         vec_cluster_pt_t *cluster = vec_get_ptr(clusters, cidx);
 
-        if (vec_length(cluster) < td->qtp.min_cluster_pixels)
+        if (vec_length(cluster) < td->config.qtp.min_cluster_pixels)
             continue;
 
         // a cluster should contain only boundary points around the
@@ -1093,7 +1094,7 @@ static void do_quad_task(void *p)
     }
 }
 
-image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
+image_u8_t *threshold(apriltag_detector_t *td, const image_u8_t *im)
 {
     int w = im->width, h = im->height, s = im->stride;
     assert(w < 32768);
@@ -1201,7 +1202,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
             int max = im_max[ty*tw + tx];
 
             // low contrast region? (no edges)
-            if (max - min < td->qtp.min_white_black_diff) {
+            if (max - min < td->config.qtp.min_white_black_diff) {
                 for (int dy = 0; dy < tilesz; dy++) {
                     int y = ty*tilesz + dy;
 
@@ -1278,7 +1279,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
 
     // this is a dilate/erode deglitching scheme that does not improve
     // anything as far as I can tell.
-    if (0 || td->qtp.deglitch) {
+    if (0 || td->config.qtp.deglitch) {
         image_u8_t *tmp = image_u8_create(w, h);
 
         for (int y = 1; y + 1 < h; y++) {
@@ -1320,7 +1321,7 @@ image_u8_t *threshold(apriltag_detector_t *td, image_u8_t *im)
 // basically the same as threshold(), but assumes the input image is a
 // bayer image. It collects statistics separately for each 2x2 block
 // of pixels. NOT WELL TESTED.
-image_u8_t *threshold_bayer(apriltag_detector_t *td, image_u8_t *im)
+image_u8_t *threshold_bayer(apriltag_detector_t *td, const image_u8_t *im)
 {
     int w = im->width, h = im->height, s = im->stride;
 
@@ -1439,7 +1440,7 @@ image_u8_t *threshold_bayer(apriltag_detector_t *td, image_u8_t *im)
 unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim, int w, int h, int ts) {
     unionfind_t *uf = unionfind_create(w * h);
 
-    if (td->nthreads <= 1) {
+    if (td->config.nthreads <= 1) {
         do_unionfind_first_line(uf, threshim, h, w, ts);
         for (int y = 1; y < h; y++) {
             do_unionfind_line2(uf, threshim, h, w, ts, y);
@@ -1448,7 +1449,7 @@ unionfind_t* connected_components(apriltag_detector_t *td, image_u8_t* threshim,
         do_unionfind_first_line(uf, threshim, h, w, ts);
 
         int sz = h;
-        int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+        int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->config.nthreads);
         struct unionfind_task *tasks = malloc(sizeof(struct unionfind_task)*(sz / chunksize + 1));
 
         int ntasks = 0;
@@ -1663,7 +1664,7 @@ void gradient_clusters(apriltag_detector_t *td, image_u8_t* threshim, int w, int
     int nclustermap = 0.2*w*h;
 
     int sz = h - 1;
-    int chunksize = 1 + sz / td->nthreads;
+    int chunksize = 1 + sz / td->config.nthreads;
     struct cluster_task *tasks = malloc(sizeof(struct cluster_task)*(sz / chunksize + 1));
 
     int ntasks = 0;
@@ -1736,13 +1737,13 @@ void fit_quads(apriltag_detector_t *td, int w, int h, vec_multi_cluster_t * clus
         normal_border |= !family->reversed_border;
         reversed_border |= family->reversed_border;
     }
-    min_tag_width /= td->quad_decimate;
+    min_tag_width /= td->config.quad_decimate;
     if (min_tag_width < 3) {
         min_tag_width = 3;
     }
 
     size_t sz = vec_length(clusters);
-    int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->nthreads);
+    int chunksize = 1 + sz / (APRILTAG_TASKS_PER_THREAD_TARGET * td->config.nthreads);
     struct quad_task *tasks = malloc(sizeof(struct quad_task)*(sz / chunksize + 1));
 
     int ntasks = 0;
@@ -1768,7 +1769,7 @@ void fit_quads(apriltag_detector_t *td, int w, int h, vec_multi_cluster_t * clus
     free(tasks);
 }
 
-void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t *quads)
+void apriltag_quad_thresh(apriltag_detector_t *td, const image_u8_t *im, vec_atquad_t *quads)
 {
     ////////////////////////////////////////////////////////
     // step 1. threshold the image, creating the edge image.
@@ -1778,7 +1779,7 @@ void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t 
     image_u8_t *threshim = threshold(td, im);
     int ts = threshim->stride;
 
-    if (td->debug)
+    if (td->config.debug)
         image_u8_write_pnm(threshim, "debug_threshold.pnm");
 
 
@@ -1787,7 +1788,7 @@ void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t 
     unionfind_t* uf = connected_components(td, threshim, w, h, ts);
 
     // make segmentation image.
-    if (td->debug) {
+    if (td->config.debug) {
         image_u8x3_t *d = image_u8x3_create(w, h);
 
         uint32_t *colors = (uint32_t*) calloc(w*h, sizeof(*colors));
@@ -1796,7 +1797,7 @@ void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t 
             for (int x = 0; x < w; x++) {
                 uint32_t v = unionfind_get_representative(uf, y*w+x);
 
-                if (unionfind_get_set_size(uf, v) < td->qtp.min_cluster_pixels)
+                if (unionfind_get_set_size(uf, v) < td->config.qtp.min_cluster_pixels)
                     continue;
 
                 uint32_t color = colors[v];
@@ -1831,7 +1832,7 @@ void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t 
     vec_init(&clusters);
     gradient_clusters(td, threshim, w, h, ts, uf, &clusters);
 
-    if (td->debug) {
+    if (td->config.debug) {
         image_u8x3_t *d = image_u8x3_create(w, h);
 
         for (vec_size_t i = 0, isz = vec_length(&clusters); i < isz; i++) {
@@ -1869,7 +1870,7 @@ void apriltag_quad_thresh(apriltag_detector_t *td, image_u8_t *im, vec_atquad_t 
 
     fit_quads(td, w, h, &clusters, im, quads);
 
-    if (td->debug) {
+    if (td->config.debug) {
         FILE *f = fopen("debug_lines.ps", "w");
         fprintf(f, "%%!PS\n\n");
 
